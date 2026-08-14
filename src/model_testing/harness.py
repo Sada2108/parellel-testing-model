@@ -104,7 +104,7 @@ async def call_one_model(model_row: dict, chunk: TestChunk) -> ModelResult:
 
         result.output_text = response.choices[0].message.content
 
-        result.cost_usd = _compute_cost(response, model_row, result)
+        result.cost_usd = _compute_cost(response, model_row, result, model_string)
 
     except Exception as e:  # one bad key / dead endpoint shouldn't kill the batch
         result.latency_ms = (time.perf_counter() - start) * 1000
@@ -114,11 +114,15 @@ async def call_one_model(model_row: dict, chunk: TestChunk) -> ModelResult:
     return result
 
 
-def _compute_cost(response, model_row: dict, result: ModelResult) -> Optional[float]:
+def _compute_cost(response, model_row: dict, result: ModelResult, model_string: str) -> Optional[float]:
     # Prefer LiteLLM's built-in pricing table -- it covers most named
-    # provider/model combos out of the box.
+    # provider/model combos out of the box. Pass ``model`` explicitly: some
+    # providers (e.g. Groq) echo back their own bare model string on the
+    # response object (no "groq/" prefix), which LiteLLM can't map to a
+    # provider on its own, so relying on completion_response alone silently
+    # loses pricing that's actually in its table under the prefixed name.
     try:
-        cost = litellm.completion_cost(completion_response=response)
+        cost = litellm.completion_cost(completion_response=response, model=model_string)
         if cost:
             return float(cost)
     except Exception:

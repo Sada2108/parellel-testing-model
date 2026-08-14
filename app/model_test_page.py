@@ -162,8 +162,13 @@ async def _run_and_score(
         for r in scorable:
             score_tasks.append(scoring.score_summary(chunk, r.output_text, judge_row))
         scores = await asyncio.gather(*score_tasks) if score_tasks else []
-        for r, (score, _raw) in zip(scorable, scores):
+        for r, (score, raw) in zip(scorable, scores):
             r.quality_score = score  # type: ignore[attr-defined]
+            if score is None and raw:
+                # Don't let a failed/unparseable judge call vanish silently --
+                # surface it via the same error column the UI already reads,
+                # without touching the model call's own result/error.
+                r.error = f"quality scoring failed: {raw[:2000]}"
 
     return results
 
@@ -323,20 +328,43 @@ def render_leaderboard_tab() -> None:
             },
         )
 
-        if board["avg_quality"].notna().any():
+        # Quality is the axis that actually needs a real value to plot
+        # meaningfully -- a model with no judge score yet can't be placed
+        # on this chart. Cost is different: missing cost data shouldn't
+        # make a model's point vanish, since $0 is not what "unknown" looks
+        # like. So: drop rows with no quality score, but for rows that DO
+        # have quality, plot missing cost as $0 and mark it clearly instead
+        # of silently dropping the whole point (which is what a bare
+        # px.scatter does with any NaN in x or y -- that's what was making
+        # this chart render completely empty even with real runs recorded).
+        plottable = board[board["avg_quality"].notna()].copy()
+        cost_missing = plottable["avg_cost_usd"].isna()
+        plottable["avg_cost_usd"] = plottable["avg_cost_usd"].fillna(0.0)
+        plottable["Cost data"] = cost_missing.map({True: "no cost data (plotted at $0)", False: "cost known"})
+
+        if plottable.empty:
+            st.info("No cost/quality data yet for these runs -- run a test with a judge model selected to populate this chart.")
+        else:
             import plotly.express as px
 
             fig = px.scatter(
-                board,
+                plottable,
                 x="avg_cost_usd",
                 y="avg_quality",
                 size="runs",
                 text="model_label",
+                color="Cost data",
+                color_discrete_map={"cost known": "#636EFA", "no cost data (plotted at $0)": "#EF553B"},
                 title="Cost vs. quality (bottom-right is the sweet spot)",
                 labels={"avg_cost_usd": "Avg cost per call ($)", "avg_quality": "Avg quality score"},
             )
             fig.update_traces(textposition="top center")
             st.plotly_chart(fig, width="stretch")
+            if cost_missing.any():
+                st.caption(
+                    "Points in red have no cost data (LiteLLM doesn't know this model's "
+                    "price and no manual override is set) -- plotted at $0, not a real cost."
+                )
 
     st.divider()
     st.subheader("Full run history")

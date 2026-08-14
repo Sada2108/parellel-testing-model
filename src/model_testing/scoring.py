@@ -69,8 +69,12 @@ async def score_summary(
         messages=[{"role": "user", "content": prompt}],
         api_key=judge_model_row["api_key"],
         temperature=0.0,
-        max_tokens=300,
-        timeout=60,
+        # Judge models are often reasoning models that spend hundreds of
+        # tokens on a <think> block before ever writing "SCORE: N" -- 300
+        # was cutting them off mid-thought every time, well before the
+        # score line. Give enough headroom for that plus the rationale.
+        max_tokens=2048,
+        timeout=90,
     )
     if judge_model_row.get("base_url"):
         kwargs["api_base"] = judge_model_row["base_url"]
@@ -78,12 +82,12 @@ async def score_summary(
     try:
         response = await litellm.acompletion(**kwargs)
         text = response.choices[0].message.content or ""
-    except Exception:
-        return None, None
+    except Exception as e:
+        return None, f"[judge call raised {type(e).__name__}] {e}"
 
     match = _SCORE_RE.search(text)
     if not match:
-        return None, text
+        return None, f"[no SCORE line found in judge response] {text}"
 
     score = float(match.group(1))
     return max(0.0, min(100.0, score)), text
