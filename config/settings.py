@@ -33,7 +33,7 @@ ENHANCEMENT_MODEL: str = "zai-org/GLM-4.5V"
 # Router endpoint that serves the enhancement model via the OpenAI protocol.
 ENHANCEMENT_BASE_URL: str = "https://router.huggingface.co/v1"
 # Text generation model used to answer retrieval queries.
-GENERATION_MODEL: str = "gemini-2.5-flash-lite"
+GENERATION_MODEL: str = "gemini-3.5-flash-lite"
 
 # ---------------------------------------------------------------------------
 # Storage locations
