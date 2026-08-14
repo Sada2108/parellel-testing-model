@@ -1,0 +1,6 @@
+[server]
+# Disable the local sources watcher in production.
+# On Streamlit Cloud the hot-reload scanner introspects imported packages
+# (e.g. transformers -> cv2) and logs spurious "libGL.so.1" ImportErrors.
+# Live reload is meaningless in prod, so turn it off entirely.
+fileWatcherType = "none"

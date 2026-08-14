@@ -1,0 +1,10 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+logs/
+
+# Model registry DB -- contains BYOK API keys (nvapi-..., gsk_..., etc), never commit.
+model_testing_data/

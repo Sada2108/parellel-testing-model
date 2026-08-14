@@ -1,0 +1,10 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+.env
+logs
+last_prompt.txt
+nltk_data
+.streamlit
