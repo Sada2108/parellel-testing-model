@@ -306,3 +306,4 @@ All tunable parameters are in `config/settings.py`:
 - **Inspection dashboard** — debug every chunk's content, health score, and quality metrics
 - **Chunk Health Score** — 0-100 rating based on content completeness
 - **All failures handled gracefully** — missing fields, malformed base64, parsing errors
+# parellel-testing-model
