@@ -101,6 +101,29 @@ def _create_llm() -> ChatGoogleGenerativeAI:
     )
 
 
+def _extract_text(content: str | list) -> str:
+    """Normalize a LangChain message ``.content`` value into plain text.
+
+    Older Gemini models (and most other chat models) return ``.content`` as
+    a plain string. Newer Gemini models return a list of content blocks
+    instead (e.g. ``[{"type": "text", "text": "..."}]``), sometimes
+    interleaved with non-text blocks (thought signatures) or empty-text
+    blocks. Handle both shapes so this keeps working regardless of which
+    shape the SDK/model gives back.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text") or "")
+        return "".join(parts)
+    return ""
+
+
 def _save_prompt_debug(message_content: list[dict]) -> None:
     """Dump the full text prompt to ``last_prompt.txt`` for inspection."""
     from pathlib import Path
@@ -147,7 +170,7 @@ def generate_answer(
             total_images,
             total_tables,
         )
-        return response.content
+        return _extract_text(response.content)
 
     except Exception as e:
         error_msg = f"Answer generation failed: {e}"
@@ -300,8 +323,9 @@ def generate_answer_stream(
 
         message = HumanMessage(content=message_content)
         for chunk in llm.stream([message]):
-            if chunk.content:
-                yield chunk.content
+            text = _extract_text(chunk.content)
+            if text:
+                yield text
 
     except Exception as e:
         logger.warning("Answer generation failed: %s", e)
