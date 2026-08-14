@@ -43,7 +43,7 @@ KNOWN_MODELS: list[KnownModel] = [
                "Groq's suggested replacement for Qwen3 32B."),
     KnownModel("Llama 3.3 70B Versatile (Groq)", "groq", "llama-3.3-70b-versatile", "https://api.groq.com/openai/v1", False,
                "Deprecated on Groq free/dev tier -- keep only for a short comparison window."),
-    KnownModel("Qwen3 32B (Groq)", "groq", "qwen3-32b", "https://api.groq.com/openai/v1", False,
+    KnownModel("Qwen3 32B (Groq)", "groq", "qwen/qwen3-32b", "https://api.groq.com/openai/v1", False,
                "Deprecated on Groq free/dev tier."),
     KnownModel("GLM-4.5 (Z.ai)", "custom", "glm-4.5", "https://api.z.ai/api/paas/v4", False,
                "Text-only. Not hosted on Groq -- goes through Z.ai's own endpoint."),
