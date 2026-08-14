@@ -23,7 +23,7 @@ A production-ready multimodal RAG pipeline that ingests PDFs (text, tables, imag
 | ![chunk-explorer](assets/dashboard-chunk-explorer.png) | ![analytics](assets/dashboard-analytics.png) | ![query](assets/dashboard-query.png) |
 
 ---
-![alt text](image.png)
+
 ## Architecture
 
 The pipeline handles **text**, **images**, and **tables** at every stage — from PDF extraction through retrieval and answer generation. Below is how each modality flows through the system.
@@ -165,7 +165,7 @@ multimodal-rag/
 ├── tests/                   # test stubs
 ├── notebooks/               # exploration notebooks
 ├── data/                    # source PDFs
-├── dbv1/                    # persisted ChromaDB (production)
+├── dbv2/                    # persisted ChromaDB (production)
 │
 ├── pyproject.toml
 ├── requirements.txt
@@ -190,7 +190,7 @@ multimodal-rag/
 
 ## API Keys
 
-This pipeline uses three services. Each is free to sign up:
+This pipeline uses two services. Each is free to sign up:
 
 ### 1. HuggingFace Token
 
@@ -202,19 +202,11 @@ Used for the embedding model (`Granite`), the vision LLM (`GLM-4.5V`), and the e
 
 ### 2. Google Gemini API Key
 
-Used for answer generation (`gemini-2.5-flash`).
+Used for answer generation (`gemini-2.5-flash-lite`).
 
 1. Go to [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
 2. Click **Create API Key** → follow the Google Cloud project flow
 3. Copy the key
-
-### 3. Groq API Key (optional)
-
-Used if you want to swap the generation model to a Groq-hosted model.
-
-1. Go to [console.groq.com/keys](https://console.groq.com/keys)
-2. Click **Create API Key**
-3. Copy the key (starts with `gsk_`)
 
 ---
 
@@ -233,10 +225,10 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 # 4. Create the environment file
-HF_TOKEN="hf_your_huggingface_token_here"
-GEMINI_API_KEY="your_gemini_api_key_here"
-GROQ_API_KEY="gsk_your_groq_key_here"
-
+cat > .env <<'EOF'
+HF_TOKEN=hf_your_huggingface_token_here
+GEMINI_API_KEY=your_gemini_api_key_here
+EOF
 
 # 5. Verify everything loads
 python -c "from config.settings import HF_TOKEN; print('Config OK')"
@@ -273,7 +265,7 @@ python -m scripts.query
 streamlit run app/dashboard.py
 ```
 
-The dashboard has four pages:
+The dashboard has five pages:
 
 | Page | Purpose |
 |---|---|
@@ -281,6 +273,7 @@ The dashboard has four pages:
 | **Compare Chunks** | Side-by-side comparison of any two chunks |
 | **Dataset Analytics** | Interactive histograms and top-20 lists |
 | **Query & Retrieve** | Run queries against the vector store, view answer + referenced chunks |
+| **Parallel Model Test** | Run the same input through multiple registered models and compare tokens, cost, latency, and quality |
 
 ---
 
@@ -291,9 +284,9 @@ All tunable parameters are in `config/settings.py`:
 | Setting | Default | Purpose |
 |---|---|---|
 | `EMBEDDING_MODEL` | `ibm-granite/granite-embedding-97m-multilingual-r2` | Embedding model |
-| `GENERATION_MODEL` | `gemini-2.5-flash` | Answer generation LLM |
-| `CHROMA_PERSIST_DIR` | `dbv1/chroma_db` | Vector store path |
-| `RETRIEVAL_K` | `5` | Number of chunks to retrieve |
+| `GENERATION_MODEL` | `gemini-2.5-flash-lite` | Answer generation LLM |
+| `CHROMA_PERSIST_DIR` | `dbv2/chroma_db` | Vector store path |
+| `RETRIEVAL_K` | `10` | Number of chunks to retrieve |
 | `CHUNK_MAX_CHARACTERS` | `3000` | Max characters per chunk |
 | `ENHANCEMENT_MODEL` | `zai-org/GLM-4.5V` | Vision model for AI summaries |
 
@@ -308,4 +301,3 @@ All tunable parameters are in `config/settings.py`:
 - **Inspection dashboard** — debug every chunk's content, health score, and quality metrics
 - **Chunk Health Score** — 0-100 rating based on content completeness
 - **All failures handled gracefully** — missing fields, malformed base64, parsing errors
-# parellel-testing-model
