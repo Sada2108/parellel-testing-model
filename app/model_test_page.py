@@ -21,8 +21,10 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+import api_client
 from src.model_testing import harness, registry, scoring, store
 from src.model_testing.datasheet_input import TestChunk, fetch_pdf_from_url, load_chunks
+from src.model_testing.rag_prompt import build_rag_test_messages
 from src.model_testing.registry import KNOWN_MODELS
 
 CUSTOM_LABEL = "Other / custom model"
@@ -174,6 +176,25 @@ async def _run_and_score(
 
 
 def render_run_tab() -> None:
+    """Run Test tab: dispatch to the call site the user picks.
+
+    "Datasheet summary" is the original, untouched flow. "Query & Retrieve"
+    is the new call site, added below without modifying the summary path.
+    """
+    call_site = st.radio(
+        "Call site",
+        ["Datasheet summary", "Query & Retrieve"],
+        horizontal=True,
+        key="mt_call_site",
+    )
+    st.divider()
+    if call_site == "Datasheet summary":
+        _render_summary_run_tab()
+    else:
+        _render_query_retrieve_run_tab()
+
+
+def _render_summary_run_tab() -> None:
     _init_run_state()
 
     st.subheader("1. Get a datasheet in")
@@ -301,12 +322,210 @@ def render_run_tab() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Run Test tab -- Query & Retrieve call site
+# ---------------------------------------------------------------------------
+def _init_qr_state() -> None:
+    defaults = {
+        "mt_qr_chunks": None,
+        "mt_qr_question": None,
+        "mt_qr_run_results": None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+async def _run_and_score_rag(
+    model_rows: list[dict],
+    question: str,
+    chunks: list[dict],
+    judge_row: dict | None,
+) -> list[harness.ModelResult]:
+    """Fan a RAG question+context prompt out to every selected model.
+
+    Unlike the summary path, the prompt differs per model (vision models
+    get chunk images attached, text-only models don't), so this builds
+    ``messages`` per model row and passes them into ``call_one_model``
+    instead of relying on its default chunk-derived prompt.
+    """
+    tasks = []
+    for row in model_rows:
+        messages = build_rag_test_messages(question, chunks, vision=bool(row["vision"]))
+        dummy_chunk = TestChunk(chunk_id="query", text=question)
+        tasks.append(harness.call_one_model(row, dummy_chunk, messages=messages))
+    results = await asyncio.gather(*tasks)
+
+    if judge_row is not None:
+        context_text = "\n\n".join((c.get("enhanced_content") or "") for c in chunks)
+        score_tasks = []
+        scorable = [r for r in results if r.output_text and not r.error]
+        for r in scorable:
+            score_tasks.append(scoring.score_answer(question, context_text, r.output_text, judge_row))
+        scores = await asyncio.gather(*score_tasks) if score_tasks else []
+        for r, (score, raw) in zip(scorable, scores):
+            r.quality_score = score  # type: ignore[attr-defined]
+            if score is None and raw:
+                r.error = f"quality scoring failed: {raw[:2000]}"
+
+    return results
+
+
+def _render_query_retrieve_run_tab() -> None:
+    _init_qr_state()
+
+    st.subheader("1. Ask a question")
+    question = st.text_input(
+        "Question", placeholder="e.g. What is the pin configuration of the LM2596?"
+    )
+
+    retrieval_mode = st.radio(
+        "Context source",
+        ["Retrieve via backend", "Paste context manually"],
+        horizontal=True,
+    )
+
+    if retrieval_mode == "Retrieve via backend":
+        top_k = st.number_input("Chunks to retrieve", min_value=1, max_value=30, value=10)
+        if st.button("Retrieve chunks", type="primary", disabled=not question):
+            try:
+                with st.spinner("Retrieving from backend..."):
+                    response = api_client.retrieve(question, top_k=int(top_k))
+                st.session_state.mt_qr_chunks = response["chunks"]
+                st.session_state.mt_qr_question = question
+                st.success(f"Retrieved {len(response['chunks'])} chunk(s).")
+            except Exception as e:
+                st.error(
+                    f"Couldn't reach the backend: {e}\n\n"
+                    "Make sure the FastAPI backend is running "
+                    "(uvicorn api.main:app --port 8000), or switch to "
+                    '"Paste context manually" below.'
+                )
+    else:
+        pasted = st.text_area(
+            "Context", height=200, placeholder="Paste retrieved context / chunk text here..."
+        )
+        if pasted and question:
+            st.session_state.mt_qr_chunks = [
+                {
+                    "enhanced_content": pasted,
+                    "raw_text": pasted,
+                    "tables_html": [],
+                    "images_base64": [],
+                }
+            ]
+            st.session_state.mt_qr_question = question
+
+    chunks = st.session_state.mt_qr_chunks
+    if not chunks or not st.session_state.mt_qr_question:
+        st.info("Enter a question and get context (via backend or pasted) to continue.")
+        return
+
+    question = st.session_state.mt_qr_question
+    st.caption(f"{len(chunks)} chunk(s) of context ready.")
+
+    st.divider()
+    st.subheader("2. Pick models and run")
+    models = registry.list_models()
+    if not models:
+        st.warning("No models registered yet -- add some in the Model Registry tab first.")
+        return
+
+    label_to_row = {m["label"]: m for m in models}
+    selected_labels = st.multiselect(
+        "Models to test in parallel", options=list(label_to_row.keys()), key="qr_models"
+    )
+
+    judge_choice = st.selectbox(
+        "Judge model for quality scoring (optional -- ideally not one you're testing)",
+        options=["No quality scoring"] + list(label_to_row.keys()),
+        key="qr_judge",
+    )
+    judge_row = label_to_row.get(judge_choice) if judge_choice != "No quality scoring" else None
+
+    tested_by = st.text_input("Tested by", placeholder="your name", key="qr_tested_by")
+
+    if st.button(
+        "Run parallel test", type="primary", disabled=not selected_labels, key="qr_run_button"
+    ):
+        model_rows = [label_to_row[lbl] for lbl in selected_labels]
+        run_id = harness.new_run_id()
+
+        with st.spinner(f"Running {len(model_rows)} model(s) in parallel..."):
+            results = asyncio.run(_run_and_score_rag(model_rows, question, chunks, judge_row))
+
+        created_at = time.time()
+        for r in results:
+            quality = getattr(r, "quality_score", None)
+            store.record_result(
+                run_id=run_id,
+                created_at=created_at,
+                tested_by=tested_by or "unknown",
+                datasheet_source=question,
+                chunk_id=f"qr:{len(chunks)}chunks",
+                model_label=r.model_label,
+                provider=r.provider,
+                model_id=r.model_id,
+                prompt_tokens=r.prompt_tokens,
+                completion_tokens=r.completion_tokens,
+                total_tokens=r.total_tokens,
+                cost_usd=r.cost_usd,
+                latency_ms=r.latency_ms,
+                quality_score=quality,
+                judge_model=judge_row["label"] if judge_row else None,
+                output_text=r.output_text,
+                error=r.error,
+                call_site="query_retrieve",
+            )
+
+        st.session_state.mt_qr_run_results = results
+        st.success("Done -- results below, and saved to the Leaderboard tab.")
+
+    results = st.session_state.mt_qr_run_results
+    if results:
+        st.divider()
+        st.subheader("Results")
+        for r in results:
+            quality = getattr(r, "quality_score", None)
+            header = f"**{r.model_label}**"
+            if r.error:
+                header += "  --  :red[failed]"
+            with st.container(border=True):
+                st.markdown(header)
+                cols = st.columns(5)
+                cols[0].metric("Tokens", r.total_tokens or "-")
+                cols[1].metric("Cost", f"${r.cost_usd:.5f}" if r.cost_usd is not None else "-")
+                cols[2].metric("Latency", f"{r.latency_ms:.0f} ms" if r.latency_ms else "-")
+                cols[3].metric("Quality", f"{quality:.0f}/100" if quality is not None else "-")
+                cols[4].write("")
+                if r.error:
+                    st.error(r.error)
+                elif r.output_text:
+                    with st.expander("Output"):
+                        st.markdown(r.output_text)
+
+
+# ---------------------------------------------------------------------------
 # Leaderboard tab
 # ---------------------------------------------------------------------------
+_CALL_SITE_LABELS = {"summary": "Datasheet summary", "query_retrieve": "Query & Retrieve"}
+
+
 def render_leaderboard_tab() -> None:
-    board = store.leaderboard()
     st.subheader("Leaderboard")
-    st.caption("Aggregated across every run anyone has kicked off -- ranked by quality, then cost.")
+    call_site_label = st.radio(
+        "Call site",
+        list(_CALL_SITE_LABELS.values()),
+        horizontal=True,
+        key="lb_call_site",
+    )
+    call_site = next(k for k, v in _CALL_SITE_LABELS.items() if v == call_site_label)
+
+    board = store.leaderboard(call_site=call_site)
+    st.caption(
+        f"Aggregated across every \"{call_site_label}\" run anyone has kicked off -- "
+        "ranked by quality, then cost. Summary and Query & Retrieve runs measure "
+        "different tasks, so they're ranked separately rather than blended together."
+    )
 
     if board.empty:
         st.info("No completed runs yet.")
@@ -371,6 +590,10 @@ def render_leaderboard_tab() -> None:
     runs = store.all_runs()
     if runs.empty:
         st.info("Nothing recorded yet.")
+        return
+    runs = runs[runs["call_site"] == call_site]
+    if runs.empty:
+        st.info(f'No "{call_site_label}" runs recorded yet.')
         return
 
     display_cols = [

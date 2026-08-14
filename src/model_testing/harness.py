@@ -69,7 +69,16 @@ def _build_messages(chunk: TestChunk, vision: bool) -> list[dict]:
     return [{"role": "user", "content": content}]
 
 
-async def call_one_model(model_row: dict, chunk: TestChunk) -> ModelResult:
+async def call_one_model(
+    model_row: dict, chunk: TestChunk, messages: list[dict] | None = None
+) -> ModelResult:
+    """Call one registered model and capture tokens/cost/latency/output.
+
+    ``messages`` lets a caller supply a pre-built prompt (e.g. a RAG
+    question+context prompt) instead of the default datasheet-summary
+    prompt built from ``chunk``. When omitted, behavior is unchanged from
+    before this parameter existed.
+    """
     result = ModelResult(
         model_row_id=model_row["id"],
         model_label=model_row["label"],
@@ -78,7 +87,7 @@ async def call_one_model(model_row: dict, chunk: TestChunk) -> ModelResult:
     )
 
     model_string = _litellm_model_string(model_row["provider"], model_row["model_id"])
-    messages = _build_messages(chunk, vision=bool(model_row["vision"]))
+    messages = messages or _build_messages(chunk, vision=bool(model_row["vision"]))
 
     kwargs: dict = dict(
         model=model_string,

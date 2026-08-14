@@ -32,6 +32,7 @@ def record_result(
     judge_model: Optional[str],
     output_text: Optional[str],
     error: Optional[str] = None,
+    call_site: str = "summary",
 ) -> None:
     init_db()
     with _connect() as conn:
@@ -41,14 +42,14 @@ def record_result(
                 run_id, created_at, tested_by, datasheet_source, chunk_id,
                 model_label, provider, model_id, prompt_tokens, completion_tokens,
                 total_tokens, cost_usd, latency_ms, quality_score, judge_model,
-                output_text, error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                output_text, error, call_site
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id, created_at, tested_by, datasheet_source, chunk_id,
                 model_label, provider, model_id, prompt_tokens, completion_tokens,
                 total_tokens, cost_usd, latency_ms, quality_score, judge_model,
-                output_text, error,
+                output_text, error, call_site,
             ),
         )
 
@@ -62,11 +63,23 @@ def all_runs() -> pd.DataFrame:
     return df
 
 
-def leaderboard() -> pd.DataFrame:
-    """Aggregate every recorded run into a per-model leaderboard."""
+def leaderboard(call_site: Optional[str] = None) -> pd.DataFrame:
+    """Aggregate recorded runs into a per-model leaderboard.
+
+    ``call_site`` filters to one call site (e.g. ``"summary"`` or
+    ``"query_retrieve"``); ``None`` aggregates across all of them. Runs from
+    different call sites measure different tasks (summarizing vs.
+    answering), so mixing them into one ranking isn't meaningful -- callers
+    should normally pass a specific call site.
+    """
     df = all_runs()
     if df.empty:
         return df
+
+    if call_site is not None:
+        df = df[df["call_site"] == call_site]
+        if df.empty:
+            return df
 
     ok = df[df["error"].isna() | (df["error"] == "")]
     if ok.empty:
