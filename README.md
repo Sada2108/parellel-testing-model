@@ -1,5 +1,7 @@
 # Multimodal RAG
 
+> **Attribution:** This is a fork of [moksh-m9u/Multimodal-Rag](https://github.com/moksh-m9u/Multimodal-Rag). All credit for the base pipeline — embeddings, ingestion, Chunk Explorer, Compare Chunks, Dataset Analytics, and Query & Retrieve — goes to Moksh. This fork adds a "Parallel Model Test" page on top of his work.
+
 A production-ready multimodal RAG pipeline that ingests PDFs (text, tables, images), creates AI-enhanced searchable summaries, stores them in a vector database, and answers queries with full multimodal context.
 
 ---
