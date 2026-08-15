@@ -25,7 +25,85 @@ from src.tracing import summarize_chunks
 logger = get_logger(__name__)
 
 
-def _build_text_prompt(chunks: list[Document], query: str) -> str:
+def _compress_chunk_summary(text: str, llm: ChatGoogleGenerativeAI, target_words: int = 100) -> str:
+    """Compress one retrieved chunk's summary for this query's context window.
+
+    Query-time only: this shortens what goes into *this one prompt*, not the
+    stored chunk (the vector store / chunks_huggingface.json keep the full
+    original summary untouched). Distinct from Phase 3A's ingestion-time
+    length limiting, which reshapes what gets stored forever. Uses a soft
+    word-count instruction, same non-truncating philosophy as 3A -- not a
+    hard token cutoff, and no change to the chunk-level summary itself.
+
+    Falls back to the original text if compression fails for any reason --
+    a failed compression call should degrade to "use full context", not
+    drop the chunk's content from the answer entirely.
+    """
+    if not text:
+        return text
+    try:
+        prompt = (
+            f"Compress the following technical summary to at most {target_words} words. "
+            "Keep only facts, numbers, and specifics relevant to being retrieved by a "
+            "search query -- drop restated boilerplate and filler.\n\n"
+            f"{text}"
+        )
+        response = llm.invoke([HumanMessage(content=[{"type": "text", "text": prompt}])])
+        compressed = _extract_text(response.content).strip()
+        return compressed or text
+    except Exception as e:
+        logger.warning("Context compression failed for a chunk, using full text: %s", e)
+        return text
+
+
+def _prompt_token_breakdown(chunks: list[Document], query: str, chunk_text_chars: int) -> dict:
+    """Rough char-length-based estimate of prompt size by component.
+
+    Not a real tokenizer count -- this codebase has no local tokenizer, and
+    a real per-component count isn't available from a single completed API
+    call (usage is only reported as one total). Char/4 is a standard rough
+    English-text token approximation; base64 image data uses the same
+    divisor purely as a size proxy (images are priced very differently by
+    the provider, not per this estimate) so the *relative* share it takes
+    up is still visible -- the diagnostic's actual point per the build doc.
+
+    ``chunk_text_chars`` is the actual chunk-text length used in the built
+    prompt (passed in rather than recomputed from ``chunks`` here) so this
+    reflects post-compression size when ``summarize_context`` was applied --
+    re-reading ``chunk.page_content`` directly would silently ignore the
+    compression and always report the original, pre-compression size.
+    """
+    instruction_chars = 400  # roughly the fixed instruction/question wrapper text
+    table_chars = 0
+    image_chars = 0
+
+    for chunk in chunks[:5]:
+        original = extract_original_data(chunk)
+        table_chars += sum(len(t) for t in original["tables_html"])
+        image_chars += sum(len(b64) for b64 in original["images_base64"])
+
+    instruction_chars += len(query)
+    total_chars = instruction_chars + chunk_text_chars + table_chars + image_chars
+
+    def _pct(n: int) -> float:
+        return round(100 * n / total_chars, 1) if total_chars else 0.0
+
+    return {
+        "instruction_pct": _pct(instruction_chars),
+        "chunk_text_pct": _pct(chunk_text_chars),
+        "tables_pct": _pct(table_chars),
+        "images_pct": _pct(image_chars),
+        "est_total_tokens": round(total_chars / 4),
+    }
+
+
+def _build_text_prompt(
+    chunks: list[Document],
+    query: str,
+    summarize_context: bool = False,
+    llm: ChatGoogleGenerativeAI | None = None,
+    stats: dict | None = None,
+) -> str:
     """Build the text portion of the prompt from retrieved chunks.
 
     Sends enhanced summaries as primary context, with HTML tables appended.
@@ -33,6 +111,17 @@ def _build_text_prompt(chunks: list[Document], query: str) -> str:
 
     Note: only the first 5 chunks are included to keep the prompt size
     predictable for the model.
+
+    ``summarize_context=False`` (default) is today's behavior, unchanged.
+    When ``True``, each chunk's enhanced summary is compressed for this
+    query's prompt only (requires ``llm`` -- reuses the same Gemini client
+    already created for the actual answer, no extra client setup).
+
+    ``stats``, if given, gets ``stats["chunk_text_chars"]`` set to the
+    actual (post-compression, when applicable) chunk-text length used --
+    lets :func:`_prompt_token_breakdown` reflect real compression, since it
+    can't re-derive that from ``chunks`` alone (that still holds the
+    original, uncompressed summaries).
     """
     parts = [
         "You are given retrieved chunks from a technical document.\n"
@@ -49,9 +138,13 @@ def _build_text_prompt(chunks: list[Document], query: str) -> str:
         "",
     ]
 
+    chunk_text_chars = 0
     for i, chunk in enumerate(chunks[:5]):
         enhanced = chunk.page_content
         if enhanced:
+            if summarize_context and llm is not None:
+                enhanced = _compress_chunk_summary(enhanced, llm)
+            chunk_text_chars += len(enhanced)
             parts.append(f"--- Chunk {i + 1} ---")
             parts.append(f"SUMMARY:\n{enhanced.strip()}\n")
 
@@ -62,6 +155,9 @@ def _build_text_prompt(chunks: list[Document], query: str) -> str:
                 parts.append(f"Table {j + 1}:\n{table}\n")
 
         parts.append("")
+
+    if stats is not None:
+        stats["chunk_text_chars"] = chunk_text_chars
 
     parts.append(
         "The images above are figures from the document. "
@@ -85,9 +181,17 @@ def _collect_images(chunks: list[Document]) -> list[dict]:
     return image_blocks
 
 
-def _build_message_content(chunks: list[Document], query: str) -> list[dict]:
+def _build_message_content(
+    chunks: list[Document],
+    query: str,
+    summarize_context: bool = False,
+    llm: ChatGoogleGenerativeAI | None = None,
+    stats: dict | None = None,
+) -> list[dict]:
     """Build the full multimodal message content list (text + images)."""
-    content: list[dict] = [{"type": "text", "text": _build_text_prompt(chunks, query)}]
+    content: list[dict] = [
+        {"type": "text", "text": _build_text_prompt(chunks, query, summarize_context, llm, stats)}
+    ]
     content.extend(_collect_images(chunks))
     return content
 
@@ -140,7 +244,7 @@ def _save_prompt_debug(message_content: list[dict]) -> None:
 
 @traceable(run_type="llm", name="GenerateAnswer")
 def generate_answer(
-    chunks: list[Document], query: str, verbose: bool = False
+    chunks: list[Document], query: str, verbose: bool = False, summarize_context: bool = False
 ) -> str:
     """Generate a final answer using the multimodal LLM.
 
@@ -148,6 +252,9 @@ def generate_answer(
         chunks: Retrieved document chunks.
         query: The original user query.
         verbose: If True, logs additional debug detail.
+        summarize_context: If True, compress each chunk's summary for this
+            query's prompt only (see :func:`_compress_chunk_summary`).
+            Default False -- unchanged behavior.
 
     Returns:
         The generated answer string.
@@ -158,8 +265,13 @@ def generate_answer(
         total_tables = sum(c.get("table_count", 0) for c in chunk_summaries)
 
         llm = _create_llm()
-        message_content = _build_message_content(chunks, query)
+        stats: dict = {}
+        message_content = _build_message_content(chunks, query, summarize_context, llm, stats)
         _save_prompt_debug(message_content)
+        logger.info(
+            "Prompt token breakdown (est.): %s",
+            _prompt_token_breakdown(chunks, query, stats.get("chunk_text_chars", 0)),
+        )
 
         message = HumanMessage(content=message_content)
         response = llm.invoke([message])
@@ -218,10 +330,27 @@ class _StreamWrapper:
     nested under the same ``AnswerQuery`` root run.
     """
 
-    def __init__(self, gen, chunks: list[Document], parent=None):
+    def __init__(
+        self,
+        gen,
+        chunks: list[Document],
+        parent=None,
+        query: str = "",
+        stats: dict | None = None,
+    ):
         self._gen = gen
         self.chunks = chunks
+        self._query = query
+        self._stats = stats if stats is not None else {}
         self._parent = parent
+
+    @property
+    def token_breakdown(self) -> dict:
+        """Computed lazily from ``_stats``, which ``generate_answer_stream``
+        populates with the real (post-compression) chunk-text size as it
+        runs -- accessing this before the stream is fully consumed will see
+        ``chunk_text_chars=0`` since generation hasn't happened yet."""
+        return _prompt_token_breakdown(self.chunks, self._query, self._stats.get("chunk_text_chars", 0))
 
     def __iter__(self):
         return self
@@ -234,7 +363,7 @@ class _StreamWrapper:
 
 
 @traceable(run_type="chain", name="AnswerQuery", dangerously_allow_filesystem=True)
-def answer_query(retriever, query: str, run_tree=None) -> str:
+def answer_query(retriever, query: str, run_tree=None, summarize_context: bool = False) -> str:
     """Retrieve chunks then generate an answer under a single LangSmith trace.
 
     Images from retrieved chunks are attached to the trace so they render in
@@ -243,17 +372,18 @@ def answer_query(retriever, query: str, run_tree=None) -> str:
     Args:
         retriever: Vector store retriever.
         query: The user's question.
+        summarize_context: See :func:`generate_answer`. Default False.
 
     Returns:
         The generated answer string.
     """
     chunks = retrieve_chunks(retriever, query)
     _attach_images_to_trace(run_tree, chunks)
-    return generate_answer(chunks, query)
+    return generate_answer(chunks, query, summarize_context=summarize_context)
 
 
 @traceable(run_type="chain", name="AnswerQuery", dangerously_allow_filesystem=True)
-def answer_query_stream(retriever, query: str, run_tree=None):
+def answer_query_stream(retriever, query: str, run_tree=None, summarize_context: bool = False):
     """Retrieve chunks then stream an answer under a single LangSmith trace.
 
     Yields answer tokens as they are produced.  The retrieved chunks are
@@ -263,6 +393,7 @@ def answer_query_stream(retriever, query: str, run_tree=None):
     Args:
         retriever: Vector store retriever.
         query: The user's question.
+        summarize_context: See :func:`generate_answer`. Default False.
 
     Yields:
         Answer token strings.
@@ -270,16 +401,23 @@ def answer_query_stream(retriever, query: str, run_tree=None):
     chunks = retrieve_chunks(retriever, query)
     _attach_images_to_trace(run_tree, chunks)
 
+    stats: dict = {}
     return _StreamWrapper(
-        generate_answer_stream(chunks, query),
+        generate_answer_stream(chunks, query, summarize_context=summarize_context, stats=stats),
         chunks,
         run_tree,
+        query=query,
+        stats=stats,
     )
 
 
 @traceable(run_type="llm", name="GenerateAnswerStream")
 def generate_answer_stream(
-    chunks: list[Document], query: str, verbose: bool = False
+    chunks: list[Document],
+    query: str,
+    verbose: bool = False,
+    summarize_context: bool = False,
+    stats: dict | None = None,
 ):
     """Generate a streaming answer using the multimodal LLM.
 
@@ -289,6 +427,11 @@ def generate_answer_stream(
         chunks: Retrieved document chunks.
         query: The original user query.
         verbose: If True, logs additional debug detail.
+        summarize_context: See :func:`generate_answer`. Default False.
+        stats: See :func:`_build_text_prompt` -- shared dict this writes
+            ``chunk_text_chars`` into, so a caller holding the same dict
+            (e.g. ``_StreamWrapper``) can read the real post-compression
+            size once generation has started.
 
     Yields:
         Answer token strings.
@@ -311,8 +454,12 @@ def generate_answer_stream(
                 len(od["images_base64"]),
             )
 
-        message_content = _build_message_content(chunks, query)
+        message_content = _build_message_content(chunks, query, summarize_context, llm, stats)
         _save_prompt_debug(message_content)
+        logger.info(
+            "Prompt token breakdown (est.): %s",
+            _prompt_token_breakdown(chunks, query, (stats or {}).get("chunk_text_chars", 0)),
+        )
 
         logger.info(
             "LangSmith trace: %d chunks, %d images, %d tables",

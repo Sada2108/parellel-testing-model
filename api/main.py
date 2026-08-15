@@ -210,10 +210,18 @@ async def retrieve(request: Request, req: RetrieveRequest) -> RetrieveResponse:
 async def query(request: Request, req: QueryRequest) -> QueryResponse:
     """Retrieve chunks and generate a full answer from the multimodal LLM."""
     try:
-        answer, base = await request.app.state.service.answer(req.query, req.top_k)
+        answer, base, token_breakdown = await request.app.state.service.answer(
+            req.query, req.top_k, summarize_context=req.summarize_context
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    return QueryResponse(**base.model_dump(), answer=answer, answer_characters=len(answer))
+    return QueryResponse(
+        **base.model_dump(),
+        answer=answer,
+        answer_characters=len(answer),
+        context_summarized=req.summarize_context,
+        prompt_token_breakdown=token_breakdown,
+    )
 
 
 def _sse(event: str, data: dict) -> str:
@@ -252,6 +260,14 @@ async def query_stream(
         description="How many chunks to retrieve from the vector store.",
         examples=[10],
     ),
+    summarize_context: bool = Query(
+        False,
+        description=(
+            "If true, compress each retrieved chunk's summary for this query's "
+            "prompt only (extra LLM call per chunk). Stored chunk content is "
+            "never modified. Default false, unchanged behavior."
+        ),
+    ),
 ) -> StreamingResponse:
     """Stream an answer over SSE.
 
@@ -265,7 +281,7 @@ async def query_stream(
 
     def generate():
         try:
-            stream = answer_query_stream(retriever, query)
+            stream = answer_query_stream(retriever, query, summarize_context=summarize_context)
             chunks = stream.chunks
             base = service.to_retrieve_response(query, chunks)
             yield _sse("retrieval", base.model_dump())
@@ -283,6 +299,8 @@ async def query_stream(
                     "answer_characters": len(answer),
                     "response_id": base.response_id,
                     "num_chunks": base.num_chunks,
+                    "context_summarized": summarize_context,
+                    "prompt_token_breakdown": stream.token_breakdown,
                 },
             )
         except Exception as exc:

@@ -76,26 +76,32 @@ class RAGService:
         chunks = await asyncio.to_thread(retrieve_chunks, retriever, query)
         return self.to_retrieve_response(query, chunks)
 
-    async def answer(self, query: str, top_k: int) -> tuple[str, RetrieveResponse]:
+    async def answer(
+        self, query: str, top_k: int, summarize_context: bool = False
+    ) -> tuple[str, RetrieveResponse, dict]:
         """Retrieve chunks and generate a full answer.
 
         Uses ``answer_query_stream`` so retrieval and generation stay under a
         single ``AnswerQuery`` trace; the answer is built by consuming every
         streamed token.
 
+        Args:
+            summarize_context: See ``generate.generate_answer``. Default False.
+
         Returns:
-            A tuple of ``(answer, retrieve_response)``.
+            A tuple of ``(answer, retrieve_response, prompt_token_breakdown)``.
         """
         await self.ensure_ready()
         retriever = self.get_retriever(top_k)
 
-        def _run() -> tuple[str, list]:
-            stream = answer_query_stream(retriever, query)
+        def _run() -> tuple[str, list, dict]:
+            stream = answer_query_stream(retriever, query, summarize_context=summarize_context)
             chunks = stream.chunks
-            return "".join(stream), chunks
+            answer_text = "".join(stream)
+            return answer_text, chunks, stream.token_breakdown
 
-        answer, chunks = await asyncio.to_thread(_run)
-        return answer, self.to_retrieve_response(query, chunks)
+        answer, chunks, token_breakdown = await asyncio.to_thread(_run)
+        return answer, self.to_retrieve_response(query, chunks), token_breakdown
 
     # -- payload assembly ---------------------------------------------------
 

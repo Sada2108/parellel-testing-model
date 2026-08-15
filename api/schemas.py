@@ -52,6 +52,16 @@ class QueryRequest(BaseModel):
         description="How many chunks to retrieve from the vector store.",
         examples=[10],
     )
+    summarize_context: bool = Field(
+        False,
+        description=(
+            "If true, compress each retrieved chunk's summary for this query's "
+            "prompt only (an extra LLM call per chunk) instead of sending the full "
+            "stored summary. Stored chunk content is never modified -- this only "
+            "affects what goes into this one answer's prompt. Default false, "
+            "unchanged behavior."
+        ),
+    )
 
     model_config = ConfigDict(json_schema_extra={"examples": QUERY_EXAMPLES})
 
@@ -184,6 +194,18 @@ class QueryResponse(RetrieveResponse):
 
     answer: str = Field(..., description="The LLM-generated answer")
     answer_characters: int = Field(..., description="Length of the answer in characters")
+    context_summarized: bool = Field(
+        False, description="Whether summarize_context was applied to this query's prompt"
+    )
+    prompt_token_breakdown: dict = Field(
+        default_factory=dict,
+        description=(
+            "Rough char-length-based estimate of prompt size by component "
+            "(instruction_pct, chunk_text_pct, tables_pct, images_pct, "
+            "est_total_tokens) -- not an exact tokenizer count, but enough to see "
+            "which component dominates prompt size (images usually do)."
+        ),
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
