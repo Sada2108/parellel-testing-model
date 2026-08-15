@@ -182,8 +182,11 @@ def _compute_cost(response, model_row: dict, result: ModelResult, model_string: 
         cost = litellm.completion_cost(completion_response=response, model=model_string)
         if cost:
             return float(cost)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(
+            "completion_cost() failed for %s (%s: %s) -- falling back to manual override",
+            model_string, type(e).__name__, e,
+        )
 
     # Fall back to a manual price override entered when the model was
     # registered (needed for brand new / self-hosted / uncatalogued models).
