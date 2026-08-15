@@ -69,6 +69,45 @@ def _build_messages(chunk: TestChunk, vision: bool) -> list[dict]:
     return [{"role": "user", "content": content}]
 
 
+def _detect_reasoning_truncation(response) -> Optional[str]:
+    """Detect a response cut off by max_tokens before producing real content.
+
+    Some providers (confirmed on NVIDIA/Nemotron) return chain-of-thought
+    in a separate ``reasoning_content`` field instead of inline <think>
+    tags. When max_tokens runs out early enough that generation is still
+    inside the reasoning phase, ``content`` doesn't hold a real answer at
+    all -- it's empty, or it's a verbatim copy of ``reasoning_content``
+    (confirmed empirically: at a low max_tokens the two fields were
+    byte-identical). Trusting ``content`` in that case silently returns
+    unfinished reasoning as if it were the model's real output.
+
+    Returns an error message if this condition is detected, else ``None``.
+    """
+    choice = response.choices[0]
+    if getattr(choice, "finish_reason", None) != "length":
+        return None
+
+    reasoning_content = (getattr(choice.message, "reasoning_content", None) or "").strip()
+    if not reasoning_content:
+        return None  # provider doesn't use this field -- nothing to compare
+
+    content = (choice.message.content or "").strip()
+    if not content:
+        return (
+            "response truncated by max_tokens while still in the reasoning "
+            f"phase -- no real content was produced (only reasoning_content, "
+            f"{len(reasoning_content)} chars)"
+        )
+
+    if content == reasoning_content or reasoning_content.startswith(content):
+        return (
+            "response truncated by max_tokens before finishing reasoning -- "
+            "'content' is just unfinished reasoning, not a real answer"
+        )
+
+    return None
+
+
 async def call_one_model(
     model_row: dict, chunk: TestChunk, messages: list[dict] | None = None
 ) -> ModelResult:
@@ -114,6 +153,15 @@ async def call_one_model(
         result.output_text = response.choices[0].message.content
 
         result.cost_usd = _compute_cost(response, model_row, result, model_string)
+
+        truncation_error = _detect_reasoning_truncation(response)
+        if truncation_error:
+            # Real tokens were spent and are worth keeping for the record,
+            # but flag this clearly so it's excluded from judge scoring
+            # (the scoring callers already skip any result with .error set)
+            # instead of silently grading unfinished reasoning as an answer.
+            result.error = truncation_error
+            logger.warning("Model call for %s: %s", model_row["label"], truncation_error)
 
     except Exception as e:  # one bad key / dead endpoint shouldn't kill the batch
         result.latency_ms = (time.perf_counter() - start) * 1000
