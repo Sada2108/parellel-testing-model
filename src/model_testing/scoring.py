@@ -23,6 +23,34 @@ from .harness import _litellm_model_string
 
 _SCORE_RE = re.compile(r"SCORE\s*:\s*(\d{1,3})", re.IGNORECASE)
 
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+_UNCLOSED_THINK_RE = re.compile(r"<think>.*", re.IGNORECASE | re.DOTALL)
+
+_NO_CONTENT_ERROR = (
+    "model produced no content outside reasoning block "
+    "(only <think>...</think> reasoning was returned)"
+)
+
+
+def _strip_think_blocks(text: str) -> str:
+    """Remove <think>...</think> reasoning blocks before a judge sees them.
+
+    Reasoning models (Qwen especially) prefix their real output with a
+    <think> block. Left in, the judge prompt's "SUMMARY/ANSWER TO GRADE"
+    section is dominated by scratch reasoning rather than the actual
+    deliverable, which was producing bogus low/zero scores.
+
+    Handles multiple blocks (all removed) and an unclosed <think> tag: if
+    generation got cut off by max_tokens while still inside the reasoning
+    block, there's no </think> to match, so everything from <think> to the
+    end of the string is treated as reasoning too -- a model that ran out
+    of budget mid-thought never produced real content after that point.
+    """
+    stripped = _THINK_BLOCK_RE.sub("", text)
+    stripped = _UNCLOSED_THINK_RE.sub("", stripped)
+    return stripped.strip()
+
+
 JUDGE_PROMPT_TEMPLATE = """You are grading a searchable summary generated for a chunk of an \
 electronics datasheet. Score how well the SUMMARY captures the ORIGINAL CONTENT.
 
@@ -57,10 +85,14 @@ async def score_summary(
     if not summary:
         return None, None
 
+    cleaned_summary = _strip_think_blocks(summary)
+    if not cleaned_summary:
+        return None, _NO_CONTENT_ERROR
+
     prompt = JUDGE_PROMPT_TEMPLATE.format(
         original_text=chunk.text[:4000],
         original_tables="\n\n".join(chunk.tables)[:2000] or "(none)",
-        summary=summary[:4000],
+        summary=cleaned_summary[:4000],
     )
 
     model_string = _litellm_model_string(judge_model_row["provider"], judge_model_row["model_id"])
@@ -135,10 +167,14 @@ async def score_answer(
     if not answer:
         return None, None
 
+    cleaned_answer = _strip_think_blocks(answer)
+    if not cleaned_answer:
+        return None, _NO_CONTENT_ERROR
+
     prompt = ANSWER_JUDGE_PROMPT_TEMPLATE.format(
         question=question[:2000],
         context=context[:6000],
-        answer=answer[:4000],
+        answer=cleaned_answer[:4000],
     )
 
     model_string = _litellm_model_string(judge_model_row["provider"], judge_model_row["model_id"])
