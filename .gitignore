@@ -13,3 +13,7 @@ model_testing_data/
 chroma_db/
 figures/
 json/
+chunks_*.json
+rag_results.json
+last_prompt.txt
+dbv2/
