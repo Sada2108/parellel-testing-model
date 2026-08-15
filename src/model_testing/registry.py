@@ -111,13 +111,17 @@ def init_db() -> None:
             """
         )
 
-        # Additive migration for DBs created before call_site existed --
+        # Additive migrations for DBs created before these columns existed --
         # SQLite has no "ADD COLUMN IF NOT EXISTS", so check first.
         existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(test_runs)")}
         if "call_site" not in existing_cols:
             conn.execute(
                 "ALTER TABLE test_runs ADD COLUMN call_site TEXT NOT NULL DEFAULT 'summary'"
             )
+        if "reasoning_tokens" not in existing_cols:
+            # prompt_tokens/completion_tokens already exist in the base
+            # CREATE TABLE above -- only reasoning_tokens is new here.
+            conn.execute("ALTER TABLE test_runs ADD COLUMN reasoning_tokens INTEGER")
 
 
 def add_model(

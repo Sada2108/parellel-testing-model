@@ -33,6 +33,7 @@ def record_result(
     output_text: Optional[str],
     error: Optional[str] = None,
     call_site: str = "summary",
+    reasoning_tokens: Optional[int] = None,
 ) -> None:
     init_db()
     with _connect() as conn:
@@ -42,14 +43,14 @@ def record_result(
                 run_id, created_at, tested_by, datasheet_source, chunk_id,
                 model_label, provider, model_id, prompt_tokens, completion_tokens,
                 total_tokens, cost_usd, latency_ms, quality_score, judge_model,
-                output_text, error, call_site
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                output_text, error, call_site, reasoning_tokens
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id, created_at, tested_by, datasheet_source, chunk_id,
                 model_label, provider, model_id, prompt_tokens, completion_tokens,
                 total_tokens, cost_usd, latency_ms, quality_score, judge_model,
-                output_text, error, call_site,
+                output_text, error, call_site, reasoning_tokens,
             ),
         )
 
@@ -88,11 +89,20 @@ def leaderboard(call_site: Optional[str] = None) -> pd.DataFrame:
     agg = ok.groupby("model_label").agg(
         runs=("model_label", "count"),
         avg_quality=("quality_score", "mean"),
+        avg_prompt_tokens=("prompt_tokens", "mean"),
+        avg_completion_tokens=("completion_tokens", "mean"),
+        avg_reasoning_tokens=("reasoning_tokens", "mean"),
         avg_tokens=("total_tokens", "mean"),
         avg_cost_usd=("cost_usd", "mean"),
         avg_latency_ms=("latency_ms", "mean"),
         total_cost_usd=("cost_usd", "sum"),
     ).reset_index()
+
+    # Fastest signal for "which model burns its budget on reasoning":
+    # what fraction of total tokens are completion (vs. prompt) tokens.
+    # NaN average tokens (e.g. every run for a model errored before usage
+    # was captured) naturally propagates to NaN here, not a divide-by-zero.
+    agg["output_ratio_pct"] = (agg["avg_completion_tokens"] / agg["avg_tokens"]) * 100
 
     agg = agg.sort_values(by=["avg_quality", "avg_cost_usd"], ascending=[False, True])
     return agg

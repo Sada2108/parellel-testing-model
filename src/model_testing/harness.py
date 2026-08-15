@@ -39,6 +39,7 @@ class ModelResult:
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
     total_tokens: Optional[int] = None
+    reasoning_tokens: Optional[int] = None
     cost_usd: Optional[float] = None
     latency_ms: Optional[float] = None
     output_text: Optional[str] = None
@@ -149,6 +150,17 @@ async def call_one_model(
             result.prompt_tokens = getattr(usage, "prompt_tokens", None)
             result.completion_tokens = getattr(usage, "completion_tokens", None)
             result.total_tokens = getattr(usage, "total_tokens", None)
+
+            # OpenAI-style shape, which LiteLLM normalizes for providers that
+            # support it. Empirically confirmed (2026-08-15) that neither
+            # Groq nor NVIDIA NIM populate this for the models registered
+            # here (completion_tokens_details is None on both) -- left as
+            # None/NULL rather than guessed, per this field's own contract:
+            # a provider not reporting reasoning tokens is not the same as
+            # "confirmed zero reasoning tokens".
+            details = getattr(usage, "completion_tokens_details", None)
+            if details is not None:
+                result.reasoning_tokens = getattr(details, "reasoning_tokens", None)
 
         result.output_text = response.choices[0].message.content
 

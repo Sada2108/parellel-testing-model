@@ -292,6 +292,7 @@ def _render_summary_run_tab() -> None:
                 judge_model=judge_row["label"] if judge_row else None,
                 output_text=r.output_text,
                 error=r.error,
+                reasoning_tokens=r.reasoning_tokens,
             )
 
         st.session_state.mt_run_results = results
@@ -475,6 +476,7 @@ def _render_query_retrieve_run_tab() -> None:
                 output_text=r.output_text,
                 error=r.error,
                 call_site="query_retrieve",
+                reasoning_tokens=r.reasoning_tokens,
             )
 
         st.session_state.mt_qr_run_results = results
@@ -530,17 +532,46 @@ def render_leaderboard_tab() -> None:
     if board.empty:
         st.info("No completed runs yet.")
     else:
+        # Historical rows predate the token-split columns and have NaN
+        # there. groupby().mean() already excludes NaN rows from the
+        # average rather than treating them as 0, but the *display* still
+        # needs an explicit "--" instead of a blank/NaN-looking cell.
+        display_board = board.copy()
+        for col in ["avg_prompt_tokens", "avg_completion_tokens", "avg_reasoning_tokens"]:
+            display_board[col] = board[col].map(
+                lambda v: "--" if pd.isna(v) else f"{v:.0f}"
+            )
+        display_board["output_ratio_pct"] = board["output_ratio_pct"].map(
+            lambda v: "--" if pd.isna(v) else f"{v:.0f}%"
+        )
+
         st.dataframe(
-            board,
+            display_board,
             width="stretch",
             hide_index=True,
+            column_order=[
+                "model_label", "runs", "avg_quality",
+                "avg_prompt_tokens", "avg_completion_tokens", "avg_reasoning_tokens",
+                "avg_tokens", "output_ratio_pct",
+                "avg_cost_usd", "avg_latency_ms", "total_cost_usd",
+            ],
             column_config={
                 "model_label": "Model",
                 "runs": st.column_config.NumberColumn("Runs"),
                 "avg_quality": st.column_config.ProgressColumn(
                     "Avg quality", min_value=0, max_value=100, format="%.0f"
                 ),
-                "avg_tokens": st.column_config.NumberColumn("Avg tokens", format="%.0f"),
+                "avg_prompt_tokens": st.column_config.TextColumn("Avg in"),
+                "avg_completion_tokens": st.column_config.TextColumn("Avg out"),
+                "avg_reasoning_tokens": st.column_config.TextColumn(
+                    "Avg reasoning", help="NULL when the provider doesn't report this separately"
+                ),
+                "avg_tokens": st.column_config.NumberColumn("Avg total", format="%.0f"),
+                "output_ratio_pct": st.column_config.TextColumn(
+                    "Output ratio",
+                    help="Avg completion tokens / avg total tokens -- the fastest signal for "
+                         "which model burns its budget on reasoning vs. producing output",
+                ),
                 "avg_cost_usd": st.column_config.NumberColumn("Avg cost ($)", format="%.5f"),
                 "avg_latency_ms": st.column_config.NumberColumn("Avg latency (ms)", format="%.0f"),
                 "total_cost_usd": st.column_config.NumberColumn("Total spent ($)", format="%.4f"),
@@ -598,9 +629,25 @@ def render_leaderboard_tab() -> None:
 
     display_cols = [
         "created_at", "tested_by", "datasheet_source", "chunk_id", "model_label",
-        "total_tokens", "cost_usd", "latency_ms", "quality_score", "error",
+        "prompt_tokens", "completion_tokens", "reasoning_tokens", "total_tokens",
+        "cost_usd", "latency_ms", "quality_score", "error",
     ]
-    st.dataframe(runs[display_cols], width="stretch", hide_index=True)
+    history_display = runs[display_cols].copy()
+    for col in ["prompt_tokens", "completion_tokens", "reasoning_tokens", "total_tokens"]:
+        history_display[col] = history_display[col].map(
+            lambda v: "--" if pd.isna(v) else f"{v:.0f}"
+        )
+    st.dataframe(
+        history_display,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "prompt_tokens": "In",
+            "completion_tokens": "Out",
+            "reasoning_tokens": "Reasoning",
+            "total_tokens": "Total",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
