@@ -203,11 +203,13 @@ async def _run_and_score(
     run_id: str | None = None,
     datasheet_source: str = "",
     tested_by: str = "unknown",
+    max_summary_words: int | None = None,
 ) -> list[harness.ModelResult]:
     results = await harness.run_parallel_test(
         model_rows, chunk,
         run_id=run_id, call_site="summary",
         datasheet_source=datasheet_source, tested_by=tested_by,
+        max_summary_words=max_summary_words,
     )
 
     if judge_row is not None:
@@ -324,6 +326,27 @@ def _render_summary_run_tab() -> None:
 
     tested_by = st.text_input("Tested by", placeholder="your name")
 
+    limit_summary = st.checkbox(
+        "Limit summary length (prompt instruction + structured template, not max_tokens)",
+        value=False,
+        help="Off = today's unbounded prompt, unchanged. On = a soft word-count target "
+             "plus a template that scales down for simple content instead of always "
+             "emitting maximal section structure. Sweep this to find the point past "
+             "which shortening starts costing quality (see the breakdown in the "
+             "Leaderboard tab).",
+    )
+    max_summary_words = (
+        st.number_input(
+            "Target word count",
+            min_value=20, max_value=500, value=150, step=10,
+            help="120-200 words is a reasonable starting range for a typical datasheet "
+                 "chunk (identification + key specs + topics) without room for restated "
+                 "boilerplate -- adjust and re-run to find your own sweet spot.",
+        )
+        if limit_summary
+        else None
+    )
+
     if st.button("Run parallel test", type="primary", disabled=not selected_labels):
         model_rows = [label_to_row[lbl] for lbl in selected_labels]
         run_id = harness.new_run_id()
@@ -334,6 +357,7 @@ def _render_summary_run_tab() -> None:
                 run_id=run_id,
                 datasheet_source=st.session_state.mt_datasheet_source or "",
                 tested_by=tested_by or "unknown",
+                max_summary_words=max_summary_words,
             ))
 
         created_at = time.time()
@@ -358,6 +382,7 @@ def _render_summary_run_tab() -> None:
                 output_text=r.output_text,
                 error=r.error,
                 reasoning_tokens=r.reasoning_tokens,
+                summary_word_limit=max_summary_words,
             )
 
         st.session_state.mt_run_results = results
@@ -702,6 +727,38 @@ def render_leaderboard_tab() -> None:
                     "Points in red have no cost data (LiteLLM doesn't know this model's "
                     "price and no manual override is set) -- plotted at $0, not a real cost."
                 )
+
+    if call_site == "summary":
+        breakdown = store.word_limit_breakdown()
+        if not breakdown.empty:
+            st.divider()
+            st.subheader("Quality vs. length (summary_word_limit)")
+            st.caption(
+                "Grouped by model + word-limit target used on each run (blank = "
+                "unbounded/default prompt) -- find the point past which shortening "
+                "starts costing quality."
+            )
+            display_breakdown = breakdown.copy()
+            display_breakdown["summary_word_limit"] = display_breakdown["summary_word_limit"].map(
+                lambda v: "unbounded" if pd.isna(v) else f"{v:.0f} words"
+            )
+            display_breakdown["avg_completion_tokens"] = display_breakdown["avg_completion_tokens"].map(
+                lambda v: "--" if pd.isna(v) else f"{v:.0f}"
+            )
+            st.dataframe(
+                display_breakdown,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "model_label": "Model",
+                    "summary_word_limit": "Word limit",
+                    "runs": st.column_config.NumberColumn("Runs"),
+                    "avg_quality": st.column_config.ProgressColumn(
+                        "Avg quality", min_value=0, max_value=100, format="%.0f"
+                    ),
+                    "avg_completion_tokens": "Avg completion tokens",
+                },
+            )
 
     st.divider()
     st.subheader("Full run history")

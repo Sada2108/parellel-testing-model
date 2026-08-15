@@ -122,6 +122,9 @@ def init_db() -> None:
             # prompt_tokens/completion_tokens already exist in the base
             # CREATE TABLE above -- only reasoning_tokens is new here.
             conn.execute("ALTER TABLE test_runs ADD COLUMN reasoning_tokens INTEGER")
+        if "summary_word_limit" not in existing_cols:
+            # NULL = unbounded/default prompt was used for this run.
+            conn.execute("ALTER TABLE test_runs ADD COLUMN summary_word_limit INTEGER")
 
 
 def add_model(

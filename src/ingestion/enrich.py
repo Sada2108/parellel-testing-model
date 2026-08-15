@@ -26,6 +26,7 @@ from config.settings import (
     HF_TOKEN,
 )
 from src.logger import get_logger
+from src.text_utils import strip_think_blocks
 
 logger = get_logger(__name__)
 
@@ -82,8 +83,21 @@ def _create_enhancement_client() -> OpenAI:
     return wrap_openai(raw, chat_name="EnhancementVisionLLM")
 
 
-def _build_enhancement_prompt(text: str, tables: list[str]) -> str:
-    """Build the text prompt for AI-based content enhancement."""
+def _build_enhancement_prompt(
+    text: str, tables: list[str], max_summary_words: int | None = None
+) -> str:
+    """Build the text prompt for AI-based content enhancement.
+
+    ``max_summary_words`` is ``None`` by default -- unbounded, today's
+    behavior, unchanged. When set, switches to a length-targeted prompt:
+    a soft word-count instruction plus a template that scales down for
+    simple content instead of always emitting maximal structure (the
+    failure mode this was built to fix: a short chunk like a package
+    outline getting a full "DOCUMENT IDENTIFICATION & METADATA" section
+    with nothing to actually put in it). Deliberately not a hard
+    ``max_tokens`` cutoff -- that truncates mid-sentence instead of
+    producing a complete, shorter summary.
+    """
     prompt = (
         "You are creating a searchable description for document content retrieval.\n\n"
         "CONTENT TO ANALYZE:\n"
@@ -96,37 +110,66 @@ def _build_enhancement_prompt(text: str, tables: list[str]) -> str:
         for i, table in enumerate(tables):
             prompt += f"Table {i + 1}:\n{table}\n\n"
 
-    prompt += (
-        "YOUR TASK:\n"
-        "Generate a comprehensive, searchable description that covers:\n\n"
-        "1. Key facts, numbers, and data points from text and tables\n"
-        "2. Main topics and concepts discussed\n"
-        "3. Questions this content could answer\n"
-        "4. Visual content analysis (charts, diagrams, patterns in images)\n"
-        "5. Alternative search terms users might use\n\n"
-        "Make it detailed and searchable - prioritize findability over brevity.\n\n"
-        "SEARCHABLE DESCRIPTION:"
-    )
+    if max_summary_words is None:
+        prompt += (
+            "YOUR TASK:\n"
+            "Generate a comprehensive, searchable description that covers:\n\n"
+            "1. Key facts, numbers, and data points from text and tables\n"
+            "2. Main topics and concepts discussed\n"
+            "3. Questions this content could answer\n"
+            "4. Visual content analysis (charts, diagrams, patterns in images)\n"
+            "5. Alternative search terms users might use\n\n"
+            "Make it detailed and searchable - prioritize findability over brevity.\n\n"
+            "SEARCHABLE DESCRIPTION:"
+        )
+    else:
+        prompt += (
+            "YOUR TASK:\n"
+            f"Write a searchable description in no more than {max_summary_words} words. "
+            "Include only information actually present in the content above; omit "
+            "boilerplate section headers and filler language not warranted by the "
+            "content's own density -- a short, simple chunk should get a short "
+            "summary, not padded-out sections.\n\n"
+            "Use only the fields below that are actually relevant -- skip any that "
+            "don't apply rather than writing \"N/A\" or leaving them empty:\n"
+            "- IDENTIFICATION: part number, document id, title, or subject, if present\n"
+            "- KEY SPECS: electrical/physical/numeric values, ratings, or parameters, if present\n"
+            "- TOPICS: what this content covers or what questions it could answer\n"
+            "- NOTES: anything else notable (visual content, tables, alternative search terms)\n\n"
+            "SEARCHABLE DESCRIPTION:"
+        )
 
     return prompt
 
 
 @traceable(run_type="llm", name="AIEnhancedSummary")
-def create_ai_enhanced_summary(text: str, tables: list[str], images: list[str]) -> str:
+def create_ai_enhanced_summary(
+    text: str, tables: list[str], images: list[str], max_summary_words: int | None = None
+) -> str:
     """Create an AI-enhanced searchable summary for mixed content.
 
     Args:
         text: Raw OCR text of the chunk.
         tables: List of HTML table strings.
         images: List of base64-encoded image strings.
+        max_summary_words: Soft word-count target (see
+            :func:`_build_enhancement_prompt`). ``None`` (default) is
+            today's unbounded behavior, unchanged.
 
     Returns:
-        The enhanced summary text, or a fallback summary on failure so the
-        pipeline can continue without the enrichment model.
+        The enhanced summary text, or a fallback summary on failure (or on
+        a response with no real content -- see below) so the pipeline can
+        continue without the enrichment model.
     """
+    fallback = f"{text[:300]}..."
+    if tables:
+        fallback += f" [Contains {len(tables)} table(s)]"
+    if images:
+        fallback += f" [Contains {len(images)} image(s)]"
+
     try:
         client = _create_enhancement_client()
-        prompt_text = _build_enhancement_prompt(text, tables)
+        prompt_text = _build_enhancement_prompt(text, tables, max_summary_words)
 
         content: list[dict] = [{"type": "text", "text": prompt_text}]
         for b64 in images:
@@ -143,20 +186,27 @@ def create_ai_enhanced_summary(text: str, tables: list[str], images: list[str]) 
             temperature=ENHANCEMENT_TEMPERATURE,
             max_tokens=ENHANCEMENT_MAX_TOKENS,
         )
-        return response.choices[0].message.content
+        # Strip any <think>...</think> reasoning block before it's stored.
+        # A no-op for models/providers that don't emit one (verified
+        # empirically against a real call to the current ENHANCEMENT_MODEL,
+        # GLM-4.5V via the HF router -- plain text, no <think> tags) --
+        # this is defensive against a future model swap, not a fix for a
+        # currently-reproducing bug in this specific model.
+        cleaned = strip_think_blocks(response.choices[0].message.content or "")
+        if not cleaned:
+            logger.warning(
+                "AI summary produced no content outside its reasoning block -- using fallback"
+            )
+            return fallback
+        return cleaned
 
     except Exception as e:
         logger.warning("AI summary failed for chunk: %s", e)
-        fallback = f"{text[:300]}..."
-        if tables:
-            fallback += f" [Contains {len(tables)} table(s)]"
-        if images:
-            fallback += f" [Contains {len(images)} image(s)]"
         return fallback
 
 
 @traceable(run_type="chain", name="SummariseChunks")
-def summarise_chunks(chunks: list) -> list[Document]:
+def summarise_chunks(chunks: list, max_summary_words: int | None = None) -> list[Document]:
     """Process all chunks with AI summaries and wrap them as LangChain Documents.
 
     Each Document stores the enhanced content as ``page_content`` and the full
@@ -164,6 +214,9 @@ def summarise_chunks(chunks: list) -> list[Document]:
 
     Args:
         chunks: List of unstructured chunks.
+        max_summary_words: Passed through to :func:`create_ai_enhanced_summary`.
+            ``None`` (default) is today's unbounded behavior, unchanged --
+            production call sites that don't pass this get identical output.
 
     Returns:
         List of LangChain ``Document`` objects ready for vector storage.
@@ -190,6 +243,7 @@ def summarise_chunks(chunks: list) -> list[Document]:
                 content_data["text"],
                 content_data["tables"],
                 content_data["images"],
+                max_summary_words,
             )
             logger.debug("    -> Enhanced: %s...", enhanced[:150])
         else:

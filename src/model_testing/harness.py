@@ -102,10 +102,14 @@ def _litellm_model_string(provider: str, model_id: str) -> str:
     return f"openai/{model_id}"
 
 
-def _build_messages(chunk: TestChunk, vision: bool) -> list[dict]:
+def _build_messages(
+    chunk: TestChunk, vision: bool, max_summary_words: int | None = None
+) -> list[dict]:
     # Same prompt the production enrichment call site uses, so results are
     # directly comparable to what's already running in the pipeline.
-    prompt_text = _build_enhancement_prompt(chunk.text, chunk.tables)
+    # max_summary_words=None (default) is the same unbounded prompt as
+    # before this parameter existed.
+    prompt_text = _build_enhancement_prompt(chunk.text, chunk.tables, max_summary_words)
 
     if not vision or not chunk.images_b64:
         return [{"role": "user", "content": prompt_text}]
@@ -162,6 +166,7 @@ async def call_one_model(
     chunk: TestChunk,
     messages: list[dict] | None = None,
     langsmith_metadata: dict | None = None,
+    max_summary_words: int | None = None,
 ) -> ModelResult:
     """Call one registered model and capture tokens/cost/latency/output.
 
@@ -172,6 +177,10 @@ async def call_one_model(
 
     ``langsmith_metadata`` (see :func:`build_langsmith_metadata`) is passed
     to LiteLLM as-is; harmless to pass even when tracing is disabled.
+
+    ``max_summary_words`` only affects the default (no ``messages``
+    supplied) summary prompt -- see ``_build_enhancement_prompt``. Ignored
+    when ``messages`` is supplied directly.
     """
     result = ModelResult(
         model_row_id=model_row["id"],
@@ -181,7 +190,9 @@ async def call_one_model(
     )
 
     model_string = _litellm_model_string(model_row["provider"], model_row["model_id"])
-    messages = messages or _build_messages(chunk, vision=bool(model_row["vision"]))
+    messages = messages or _build_messages(
+        chunk, vision=bool(model_row["vision"]), max_summary_words=max_summary_words
+    )
 
     kwargs: dict = dict(
         model=model_string,
@@ -276,6 +287,7 @@ async def run_parallel_test(
     call_site: str = "summary",
     datasheet_source: str = "",
     tested_by: str = "unknown",
+    max_summary_words: int | None = None,
 ) -> list[ModelResult]:
     """Fan ``chunk`` out to every model row in parallel.
 
@@ -283,6 +295,9 @@ async def run_parallel_test(
     call in this batch into one LangSmith session/trace tree, so the whole
     fan-out is inspectable as a unit. When omitted, no metadata is attached
     (tracing simply has nothing to group by).
+
+    ``max_summary_words`` (see ``_build_enhancement_prompt``) is ``None`` by
+    default -- unbounded, unchanged from before this parameter existed.
     """
     tasks = [
         call_one_model(
@@ -301,6 +316,7 @@ async def run_parallel_test(
                 if run_id
                 else None
             ),
+            max_summary_words=max_summary_words,
         )
         for row in model_rows
     ]

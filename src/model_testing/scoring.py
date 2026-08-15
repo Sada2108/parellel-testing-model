@@ -18,37 +18,17 @@ from typing import Optional
 
 import litellm
 
+from src.text_utils import strip_think_blocks
+
 from .datasheet_input import TestChunk
 from .harness import _litellm_model_string
 
 _SCORE_RE = re.compile(r"SCORE\s*:\s*(\d{1,3})", re.IGNORECASE)
 
-_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
-_UNCLOSED_THINK_RE = re.compile(r"<think>.*", re.IGNORECASE | re.DOTALL)
-
 _NO_CONTENT_ERROR = (
     "model produced no content outside reasoning block "
     "(only <think>...</think> reasoning was returned)"
 )
-
-
-def strip_think_blocks(text: str) -> str:
-    """Remove <think>...</think> reasoning blocks before a judge sees them.
-
-    Reasoning models (Qwen especially) prefix their real output with a
-    <think> block. Left in, the judge prompt's "SUMMARY/ANSWER TO GRADE"
-    section is dominated by scratch reasoning rather than the actual
-    deliverable, which was producing bogus low/zero scores.
-
-    Handles multiple blocks (all removed) and an unclosed <think> tag: if
-    generation got cut off by max_tokens while still inside the reasoning
-    block, there's no </think> to match, so everything from <think> to the
-    end of the string is treated as reasoning too -- a model that ran out
-    of budget mid-thought never produced real content after that point.
-    """
-    stripped = _THINK_BLOCK_RE.sub("", text)
-    stripped = _UNCLOSED_THINK_RE.sub("", stripped)
-    return stripped.strip()
 
 
 JUDGE_PROMPT_TEMPLATE = """You are grading a searchable summary generated for a chunk of an \

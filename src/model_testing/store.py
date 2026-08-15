@@ -34,6 +34,7 @@ def record_result(
     error: Optional[str] = None,
     call_site: str = "summary",
     reasoning_tokens: Optional[int] = None,
+    summary_word_limit: Optional[int] = None,
 ) -> None:
     init_db()
     with _connect() as conn:
@@ -43,14 +44,14 @@ def record_result(
                 run_id, created_at, tested_by, datasheet_source, chunk_id,
                 model_label, provider, model_id, prompt_tokens, completion_tokens,
                 total_tokens, cost_usd, latency_ms, quality_score, judge_model,
-                output_text, error, call_site, reasoning_tokens
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                output_text, error, call_site, reasoning_tokens, summary_word_limit
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id, created_at, tested_by, datasheet_source, chunk_id,
                 model_label, provider, model_id, prompt_tokens, completion_tokens,
                 total_tokens, cost_usd, latency_ms, quality_score, judge_model,
-                output_text, error, call_site, reasoning_tokens,
+                output_text, error, call_site, reasoning_tokens, summary_word_limit,
             ),
         )
 
@@ -105,4 +106,31 @@ def leaderboard(call_site: Optional[str] = None) -> pd.DataFrame:
     agg["output_ratio_pct"] = (agg["avg_completion_tokens"] / agg["avg_tokens"]) * 100
 
     agg = agg.sort_values(by=["avg_quality", "avg_cost_usd"], ascending=[False, True])
+    return agg
+
+
+def word_limit_breakdown() -> pd.DataFrame:
+    """Quality vs. length across summary_word_limit variants, per model.
+
+    Only meaningful for the "summary" call site (word-limit sweeping is a
+    Phase 3A concept). A plain groupby -- not fancy, per the build doc --
+    so the point past which shortening starts costing quality is visible
+    at a glance: NULL summary_word_limit (unbounded, the default) rows
+    group separately from any numeric target tried.
+    """
+    df = all_runs()
+    if df.empty:
+        return df
+    df = df[df["call_site"] == "summary"]
+    ok = df[df["error"].isna() | (df["error"] == "")]
+    if ok.empty:
+        return pd.DataFrame()
+
+    agg = ok.groupby(["model_label", "summary_word_limit"], dropna=False).agg(
+        runs=("model_label", "count"),
+        avg_quality=("quality_score", "mean"),
+        avg_completion_tokens=("completion_tokens", "mean"),
+    ).reset_index()
+
+    agg = agg.sort_values(by=["model_label", "summary_word_limit"], na_position="first")
     return agg
