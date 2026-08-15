@@ -738,12 +738,116 @@ def render_leaderboard_tab() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Compare Outputs tab
+# ---------------------------------------------------------------------------
+# NOTE: output_text is stored raw/unstripped in SQLite on purpose (see the
+# think-tag-stripping fix -- storage keeps the forensic record, only the
+# judge and this display get a cleaned view). If model_testing.db starts
+# approaching tens of MB from output_text accumulation, that's the signal
+# to move output_text to its own table or to disk -- not a problem yet at
+# current scale.
+def render_compare_tab() -> None:
+    st.subheader("Compare Outputs")
+    st.caption(
+        "Compare stored outputs for the same (datasheet/question, chunk, call site) "
+        "across models, or across different runs of the same model -- e.g. before/after "
+        "a prompt change. Reuses the natural key already recorded on every run."
+    )
+
+    runs = store.all_runs()
+    if runs.empty:
+        st.info("No runs recorded yet -- run some tests first.")
+        return
+
+    call_site_label = st.radio(
+        "Call site", list(_CALL_SITE_LABELS.values()), horizontal=True, key="cmp_call_site"
+    )
+    call_site = next(k for k, v in _CALL_SITE_LABELS.items() if v == call_site_label)
+    runs = runs[runs["call_site"] == call_site]
+    if runs.empty:
+        st.info(f'No "{call_site_label}" runs recorded yet.')
+        return
+
+    sources = sorted(runs["datasheet_source"].dropna().unique().tolist())
+    if not sources:
+        st.info("No runs with a recorded source yet.")
+        return
+    source = st.selectbox(
+        "Datasheet source" if call_site == "summary" else "Question", options=sources, key="cmp_source"
+    )
+    runs = runs[runs["datasheet_source"] == source]
+
+    chunk_ids = sorted(runs["chunk_id"].dropna().unique().tolist(), key=str)
+    chunk_id = st.selectbox("Chunk id", options=chunk_ids, key="cmp_chunk_id")
+    runs = runs[runs["chunk_id"] == chunk_id]
+
+    if runs.empty:
+        st.info("No runs for that combination.")
+        return
+
+    # Label each stored run distinctly so the SAME model across different
+    # runs (e.g. before/after a prompt change) can still be told apart --
+    # comparing across runs, not just within one run, is the whole point.
+    runs = runs.reset_index(drop=True)
+    runs["_label"] = runs.apply(
+        lambda row: "{} -- {} -- run {}".format(
+            row["model_label"],
+            row["created_at"].strftime("%Y-%m-%d %H:%M") if pd.notna(row["created_at"]) else "?",
+            str(row["run_id"])[:8],
+        ),
+        axis=1,
+    )
+
+    selected_labels = st.multiselect(
+        "Runs to compare", options=runs["_label"].tolist(), key="cmp_selected_runs"
+    )
+    if not selected_labels:
+        st.info("Pick 2 or more runs above to compare them side by side.")
+        return
+
+    show_raw = st.toggle(
+        "Show raw output (including <think> reasoning)",
+        value=False,
+        help="Default view strips <think>...</think> blocks for easier reading -- "
+             "the DB always keeps the raw output, this only affects what's displayed here.",
+        key="cmp_show_raw",
+    )
+
+    selected_rows = runs[runs["_label"].isin(selected_labels)]
+    cols = st.columns(len(selected_rows))
+    for col, (_, row) in zip(cols, selected_rows.iterrows()):
+        with col:
+            st.subheader(row["model_label"])
+            st.caption(row["_label"])
+
+            def _fmt(v, spec="{:.0f}"):
+                return "--" if pd.isna(v) else spec.format(v)
+
+            st.metric("Prompt tokens", _fmt(row["prompt_tokens"]))
+            st.metric("Completion tokens", _fmt(row["completion_tokens"]))
+            st.metric("Reasoning tokens", _fmt(row["reasoning_tokens"]))
+            st.metric("Cost ($)", _fmt(row["cost_usd"], "${:.5f}"))
+            st.metric("Quality", _fmt(row["quality_score"], "{:.0f}/100"))
+
+            if row["error"]:
+                st.error(row["error"])
+
+            output_text = row["output_text"] or ""
+            display_text = output_text if show_raw else scoring.strip_think_blocks(output_text)
+            st.markdown(display_text or "*empty*")
+
+
+# ---------------------------------------------------------------------------
 def render() -> None:
     st.header("Parallel Model Test")
-    tab1, tab2, tab3 = st.tabs(["Model Registry", "Run Test", "Leaderboard"])
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["Model Registry", "Run Test", "Leaderboard", "Compare Outputs"]
+    )
     with tab1:
         render_model_registry_tab()
     with tab2:
         render_run_tab()
     with tab3:
         render_leaderboard_tab()
+    with tab4:
+        render_compare_tab()

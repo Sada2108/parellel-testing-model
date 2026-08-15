@@ -32,7 +32,7 @@ _NO_CONTENT_ERROR = (
 )
 
 
-def _strip_think_blocks(text: str) -> str:
+def strip_think_blocks(text: str) -> str:
     """Remove <think>...</think> reasoning blocks before a judge sees them.
 
     Reasoning models (Qwen especially) prefix their real output with a
@@ -91,7 +91,7 @@ async def score_summary(
     if not summary:
         return None, None
 
-    cleaned_summary = _strip_think_blocks(summary)
+    cleaned_summary = strip_think_blocks(summary)
     if not cleaned_summary:
         return None, _NO_CONTENT_ERROR
 
@@ -179,7 +179,7 @@ async def score_answer(
     if not answer:
         return None, None
 
-    cleaned_answer = _strip_think_blocks(answer)
+    cleaned_answer = strip_think_blocks(answer)
     if not cleaned_answer:
         return None, _NO_CONTENT_ERROR
 
