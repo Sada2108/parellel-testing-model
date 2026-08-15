@@ -79,9 +79,15 @@ async def score_summary(
     chunk: TestChunk,
     summary: str,
     judge_model_row: dict,
+    langsmith_metadata: dict | None = None,
 ) -> tuple[Optional[float], Optional[str]]:
     """Returns (score, raw_judge_response). Score is None if grading failed
-    or the judge's response couldn't be parsed."""
+    or the judge's response couldn't be parsed.
+
+    ``langsmith_metadata`` (see ``harness._build_langsmith_metadata``) is
+    passed to LiteLLM as-is -- judge calls get traced too, not just the
+    models under test.
+    """
     if not summary:
         return None, None
 
@@ -110,6 +116,8 @@ async def score_summary(
     )
     if judge_model_row.get("base_url"):
         kwargs["api_base"] = judge_model_row["base_url"]
+    if langsmith_metadata is not None:
+        kwargs["metadata"] = langsmith_metadata
 
     try:
         response = await litellm.acompletion(**kwargs)
@@ -155,6 +163,7 @@ async def score_answer(
     context: str,
     answer: str,
     judge_model_row: dict,
+    langsmith_metadata: dict | None = None,
 ) -> tuple[Optional[float], Optional[str]]:
     """Grade a RAG answer against the question and the context it was given.
 
@@ -163,6 +172,9 @@ async def score_answer(
     because the rubric is genuinely different -- this grades an answer's
     correctness/faithfulness to given context, not a summary's coverage of
     original content.
+
+    ``langsmith_metadata`` is passed to LiteLLM as-is, same as
+    ``score_summary``.
     """
     if not answer:
         return None, None
@@ -188,6 +200,8 @@ async def score_answer(
     )
     if judge_model_row.get("base_url"):
         kwargs["api_base"] = judge_model_row["base_url"]
+    if langsmith_metadata is not None:
+        kwargs["metadata"] = langsmith_metadata
 
     try:
         response = await litellm.acompletion(**kwargs)

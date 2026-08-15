@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 .env
 .env.*
+!.env.example
 logs/
 
 # Model registry DB -- contains BYOK API keys (nvapi-..., gsk_..., etc), never commit.

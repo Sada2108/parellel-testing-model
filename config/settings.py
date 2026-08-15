@@ -22,6 +22,10 @@ load_dotenv()
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 HF_TOKEN: str = os.getenv("HF_TOKEN", "")
 HUGGINGFACEHUB_API_TOKEN: str = os.getenv("HUGGINGFACEHUB_API_TOKEN", "")
+# Optional -- enables LiteLLM's langsmith success callback in the model
+# testing harness (src/model_testing/harness.py). Absent = tracing simply
+# doesn't fire; not a hard dependency for running tests.
+LANGSMITH_API_KEY: str = os.getenv("LANGSMITH_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Model selection

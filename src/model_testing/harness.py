@@ -11,6 +11,7 @@ token usage out of the response.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from typing import Optional
 
 import litellm
 
+import config.settings as _settings  # side effect: load_dotenv(), so .env-sourced keys land in os.environ
 from src.ingestion.enrich import _build_enhancement_prompt
 from src.logger import get_logger
 
@@ -28,6 +30,52 @@ logger = get_logger(__name__)
 # LiteLLM is chatty by default about missing prices / unmapped models --
 # those aren't errors here, they're expected for brand new or custom models.
 litellm.suppress_debug_info = True
+
+# LangSmith tracing via LiteLLM's built-in callback (not the LangSmith SDK's
+# own LANGSMITH_TRACING flag/@traceable -- using both at once on the same
+# calls produces duplicate traces). Optional: absent key just means the
+# callback never fires, not a hard dependency for running tests.
+#
+# NOTE: once enabled, full prompts and responses leave this machine and are
+# sent to LangSmith's cloud for every model call (including judge calls).
+# Acceptable here (test harness on public datasheets, not user data) --
+# keep this note if templating this pattern elsewhere with real user data.
+LANGSMITH_ENABLED = bool(_settings.LANGSMITH_API_KEY)
+if LANGSMITH_ENABLED:
+    os.environ.setdefault("LANGSMITH_API_KEY", _settings.LANGSMITH_API_KEY)
+    os.environ.setdefault("LANGSMITH_PROJECT", "parallel-model-test")
+    litellm.success_callback = ["langsmith"]
+else:
+    logger.info("LANGSMITH_API_KEY not set -- LiteLLM->LangSmith tracing disabled for this harness.")
+
+
+def build_langsmith_metadata(
+    session_id: str,
+    call_site: str,
+    model_label: str,
+    provider: str,
+    chunk_id: str,
+    datasheet_source: str,
+    tested_by: str,
+) -> dict:
+    """Build the ``metadata`` dict LiteLLM's langsmith callback reads.
+
+    Verified against the installed litellm's actual source
+    (litellm/integrations/langsmith.py): ``session_id`` groups every call
+    in one parallel-run batch into a single LangSmith session/trace tree;
+    ``run_name`` sets the per-call trace name; ``tags`` maps to
+    ``request_tags`` (read via ``metadata.get("tags", [])`` in
+    ``litellm_logging.py``); any other keys land in the trace's ``extra``
+    metadata, which is where chunk_id/datasheet_source/tested_by go.
+    """
+    return {
+        "session_id": session_id,
+        "run_name": f"{call_site}:{model_label}",
+        "tags": [model_label, provider, call_site],
+        "chunk_id": chunk_id,
+        "datasheet_source": datasheet_source,
+        "tested_by": tested_by,
+    }
 
 
 @dataclass
@@ -110,7 +158,10 @@ def _detect_reasoning_truncation(response) -> Optional[str]:
 
 
 async def call_one_model(
-    model_row: dict, chunk: TestChunk, messages: list[dict] | None = None
+    model_row: dict,
+    chunk: TestChunk,
+    messages: list[dict] | None = None,
+    langsmith_metadata: dict | None = None,
 ) -> ModelResult:
     """Call one registered model and capture tokens/cost/latency/output.
 
@@ -118,6 +169,9 @@ async def call_one_model(
     question+context prompt) instead of the default datasheet-summary
     prompt built from ``chunk``. When omitted, behavior is unchanged from
     before this parameter existed.
+
+    ``langsmith_metadata`` (see :func:`build_langsmith_metadata`) is passed
+    to LiteLLM as-is; harmless to pass even when tracing is disabled.
     """
     result = ModelResult(
         model_row_id=model_row["id"],
@@ -139,6 +193,8 @@ async def call_one_model(
     )
     if model_row.get("base_url"):
         kwargs["api_base"] = model_row["base_url"]
+    if langsmith_metadata is not None:
+        kwargs["metadata"] = langsmith_metadata
 
     start = time.perf_counter()
     try:
@@ -212,8 +268,42 @@ def _compute_cost(response, model_row: dict, result: ModelResult, model_string: 
     return None
 
 
-async def run_parallel_test(model_rows: list[dict], chunk: TestChunk) -> list[ModelResult]:
-    tasks = [call_one_model(row, chunk) for row in model_rows]
+async def run_parallel_test(
+    model_rows: list[dict],
+    chunk: TestChunk,
+    *,
+    run_id: str | None = None,
+    call_site: str = "summary",
+    datasheet_source: str = "",
+    tested_by: str = "unknown",
+) -> list[ModelResult]:
+    """Fan ``chunk`` out to every model row in parallel.
+
+    ``run_id`` (reused as the LangSmith ``session_id``) groups every model
+    call in this batch into one LangSmith session/trace tree, so the whole
+    fan-out is inspectable as a unit. When omitted, no metadata is attached
+    (tracing simply has nothing to group by).
+    """
+    tasks = [
+        call_one_model(
+            row,
+            chunk,
+            langsmith_metadata=(
+                build_langsmith_metadata(
+                    session_id=run_id,
+                    call_site=call_site,
+                    model_label=row["label"],
+                    provider=row["provider"],
+                    chunk_id=chunk.chunk_id,
+                    datasheet_source=datasheet_source,
+                    tested_by=tested_by,
+                )
+                if run_id
+                else None
+            ),
+        )
+        for row in model_rows
+    ]
     return await asyncio.gather(*tasks)
 
 

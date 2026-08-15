@@ -155,14 +155,29 @@ async def _run_and_score(
     model_rows: list[dict],
     chunk: TestChunk,
     judge_row: dict | None,
+    run_id: str | None = None,
+    datasheet_source: str = "",
+    tested_by: str = "unknown",
 ) -> list[harness.ModelResult]:
-    results = await harness.run_parallel_test(model_rows, chunk)
+    results = await harness.run_parallel_test(
+        model_rows, chunk,
+        run_id=run_id, call_site="summary",
+        datasheet_source=datasheet_source, tested_by=tested_by,
+    )
 
     if judge_row is not None:
         score_tasks = []
         scorable = [r for r in results if r.output_text and not r.error]
         for r in scorable:
-            score_tasks.append(scoring.score_summary(chunk, r.output_text, judge_row))
+            judge_metadata = (
+                harness.build_langsmith_metadata(
+                    session_id=run_id, call_site="summary",
+                    model_label=f"judge:{judge_row['label']}", provider=judge_row["provider"],
+                    chunk_id=chunk.chunk_id, datasheet_source=datasheet_source, tested_by=tested_by,
+                )
+                if run_id else None
+            )
+            score_tasks.append(scoring.score_summary(chunk, r.output_text, judge_row, judge_metadata))
         scores = await asyncio.gather(*score_tasks) if score_tasks else []
         for r, (score, raw) in zip(scorable, scores):
             r.quality_score = score  # type: ignore[attr-defined]
@@ -269,7 +284,12 @@ def _render_summary_run_tab() -> None:
         run_id = harness.new_run_id()
 
         with st.spinner(f"Running {len(model_rows)} model(s) in parallel..."):
-            results = asyncio.run(_run_and_score(model_rows, chunk, judge_row))
+            results = asyncio.run(_run_and_score(
+                model_rows, chunk, judge_row,
+                run_id=run_id,
+                datasheet_source=st.session_state.mt_datasheet_source or "",
+                tested_by=tested_by or "unknown",
+            ))
 
         created_at = time.time()
         for r in results:
@@ -341,6 +361,8 @@ async def _run_and_score_rag(
     question: str,
     chunks: list[dict],
     judge_row: dict | None,
+    run_id: str | None = None,
+    tested_by: str = "unknown",
 ) -> list[harness.ModelResult]:
     """Fan a RAG question+context prompt out to every selected model.
 
@@ -349,11 +371,20 @@ async def _run_and_score_rag(
     ``messages`` per model row and passes them into ``call_one_model``
     instead of relying on its default chunk-derived prompt.
     """
+    chunk_id = f"qr:{len(chunks)}chunks"
     tasks = []
     for row in model_rows:
         messages = build_rag_test_messages(question, chunks, vision=bool(row["vision"]))
         dummy_chunk = TestChunk(chunk_id="query", text=question)
-        tasks.append(harness.call_one_model(row, dummy_chunk, messages=messages))
+        langsmith_metadata = (
+            harness.build_langsmith_metadata(
+                session_id=run_id, call_site="query_retrieve",
+                model_label=row["label"], provider=row["provider"],
+                chunk_id=chunk_id, datasheet_source=question, tested_by=tested_by,
+            )
+            if run_id else None
+        )
+        tasks.append(harness.call_one_model(row, dummy_chunk, messages=messages, langsmith_metadata=langsmith_metadata))
     results = await asyncio.gather(*tasks)
 
     if judge_row is not None:
@@ -361,7 +392,15 @@ async def _run_and_score_rag(
         score_tasks = []
         scorable = [r for r in results if r.output_text and not r.error]
         for r in scorable:
-            score_tasks.append(scoring.score_answer(question, context_text, r.output_text, judge_row))
+            judge_metadata = (
+                harness.build_langsmith_metadata(
+                    session_id=run_id, call_site="query_retrieve",
+                    model_label=f"judge:{judge_row['label']}", provider=judge_row["provider"],
+                    chunk_id=chunk_id, datasheet_source=question, tested_by=tested_by,
+                )
+                if run_id else None
+            )
+            score_tasks.append(scoring.score_answer(question, context_text, r.output_text, judge_row, judge_metadata))
         scores = await asyncio.gather(*score_tasks) if score_tasks else []
         for r, (score, raw) in zip(scorable, scores):
             r.quality_score = score  # type: ignore[attr-defined]
@@ -452,7 +491,10 @@ def _render_query_retrieve_run_tab() -> None:
         run_id = harness.new_run_id()
 
         with st.spinner(f"Running {len(model_rows)} model(s) in parallel..."):
-            results = asyncio.run(_run_and_score_rag(model_rows, question, chunks, judge_row))
+            results = asyncio.run(_run_and_score_rag(
+                model_rows, question, chunks, judge_row,
+                run_id=run_id, tested_by=tested_by or "unknown",
+            ))
 
         created_at = time.time()
         for r in results:
