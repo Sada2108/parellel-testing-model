@@ -15,6 +15,7 @@ Three tabs:
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from pathlib import Path
 
@@ -28,6 +29,38 @@ from src.model_testing.rag_prompt import build_rag_test_messages
 from src.model_testing.registry import KNOWN_MODELS
 
 CUSTOM_LABEL = "Other / custom model"
+
+
+def _validate_base_url(base_url: str, model_id: str) -> list[str]:
+    """Non-blocking sanity checks for a pasted API base URL.
+
+    Heuristics only, not a hard stop -- legitimate custom/local endpoints
+    exist that won't match these patterns. Generalized from a NVIDIA-
+    specific "pasted the playground URL" check into two provider-agnostic
+    smells. Version-suffix pattern is /v\\d+ (not literally /v1) because
+    registered providers vary: Groq and the HF router use /v1, Z.ai uses
+    /v4 -- checked the actual KNOWN_MODELS entries before picking this.
+    """
+    warnings: list[str] = []
+    if not base_url:
+        return warnings
+
+    model_id_clean = model_id.strip()
+    if model_id_clean and model_id_clean in base_url:
+        warnings.append(
+            "This URL contains the model id in its path -- that's usually a sign "
+            "it's a webpage/playground URL, not the API endpoint. Most providers' "
+            "API base URLs don't include the model name."
+        )
+
+    if not re.search(r"/v\d+/?$", base_url):
+        warnings.append(
+            "This URL doesn't end in a version segment like /v1 (most "
+            "OpenAI-compatible API bases do, e.g. .../v1 or .../v4). "
+            "Double-check this is the API base, not a docs/homepage URL."
+        )
+
+    return warnings
 
 
 # ---------------------------------------------------------------------------
@@ -64,11 +97,29 @@ def render_model_registry_tab() -> None:
                 "Model id",
                 value=known.model_id if known else "",
                 placeholder="exact model string the provider expects",
+                help="Many providers namespace model IDs (e.g. `qwen/qwen3.6-27b`, "
+                     "`nvidia/nemotron-3-ultra-550b-a55b`). Copy the exact string from "
+                     "the provider's docs -- don't type it from memory.",
             )
             base_url = st.text_input(
                 "Base URL (used when provider is 'custom')",
                 value=known.base_url if known else "",
                 placeholder="https://...",
+                help="This is an API endpoint, not the webpage where you browse the "
+                     "model. If the URL has the model name in the path, it's probably "
+                     "the wrong one. Most providers' base URLs end in `/v1`.",
+            )
+
+        with st.expander("How do I find my base URL?"):
+            st.markdown(
+                "- **Groq**: `https://api.groq.com/openai/v1`\n"
+                "- **NVIDIA NIM**: `https://integrate.api.nvidia.com/v1` -- "
+                "not `build.nvidia.com` (that's the browser playground)\n"
+                "- **Z.ai**: `https://api.z.ai/api/paas/v4`\n"
+                "- **OpenAI**: `https://api.openai.com/v1`\n"
+                "- **Local / vLLM / Ollama etc.**: typically "
+                "`http://localhost:PORT/v1` -- check your server's own startup "
+                "logs or docs for the exact port and path"
             )
 
         vision = st.checkbox(
@@ -93,16 +144,10 @@ def render_model_registry_tab() -> None:
                 st.error("Display name, model id and API key are required.")
             else:
                 base_url_clean = base_url.strip()
-                looks_like_nvidia_webpage = (
-                    "build.nvidia.com" in base_url_clean
-                    and "integrate.api.nvidia.com" not in base_url_clean
-                )
-                if looks_like_nvidia_webpage:
+                url_warnings = _validate_base_url(base_url_clean, model_id)
+                for msg in url_warnings:
                     st.warning(
-                        "This looks like NVIDIA's website URL, not their API endpoint. "
-                        "NVIDIA NIM's API base is usually "
-                        "https://integrate.api.nvidia.com/v1 -- did you mean that? "
-                        "(Saved as entered -- edit the row below if this was a mistake.)"
+                        f"{msg} (Saved as entered -- edit the row below if this was a mistake.)"
                     )
 
                 registry.add_model(
@@ -116,7 +161,7 @@ def render_model_registry_tab() -> None:
                     price_out_per_1m=price_out or None,
                 )
                 st.success(f"Added {label}.")
-                if not looks_like_nvidia_webpage:
+                if not url_warnings:
                     st.rerun()
 
     st.divider()
