@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "multimodal-rag"
 version = "0.1.0"
 description = "Multimodal RAG pipeline — PDF ingestion, vector search, and answer generation"
-requires-python = ">=3.13"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "langchain",
     "langsmith",
