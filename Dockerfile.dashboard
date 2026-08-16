@@ -1,0 +1,48 @@
+# Multimodal RAG - Streamlit dashboard image.
+#
+# Separate from the root Dockerfile (the FastAPI backend): this one runs the
+# Streamlit UI (Chunk Explorer, Parallel Model Test, etc.). Railway auto-picks
+# the root `Dockerfile` by default, so point this service's Settings > Build >
+# Custom Dockerfile Path at `Dockerfile.dashboard` explicitly.
+#
+# Build:   docker build -f Dockerfile.dashboard -t multimodal-rag-dashboard .
+# Run:     docker run --rm -p 8501:8501 --env-file .env multimodal-rag-dashboard
+
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/app/.hf
+
+WORKDIR /app
+
+# libgl1/libglib2.0-0: OpenCV (image handling). poppler-utils/tesseract-ocr:
+# unstructured's hi_res PDF strategy (config/settings.py PDF_STRATEGY),
+# exercised by the dashboard's "upload a new PDF" test feature.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+        poppler-utils \
+        tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
+
+# CPU-only PyTorch first, same reasoning as the API image: unstructured's
+# hi_res strategy pulls in unstructured-inference (torch-based layout
+# detection), and the default wheel drags ~2GB of unused CUDA libs.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+RUN mkdir -p /app/logs model_testing_data && chmod -R u+w /app
+
+ENV PORT=8501
+EXPOSE 8501
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/_stcore/health' % os.getenv('PORT', '8501'), timeout=5)"
+
+CMD ["sh", "-c", "streamlit run app/dashboard.py --server.port ${PORT:-8501} --server.address 0.0.0.0 --server.headless true"]

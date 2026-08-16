@@ -1,0 +1,15 @@
+langchain
+langsmith
+langchain-chroma
+langchain-community
+langchain-google-genai
+langchain-huggingface
+langchain-openai
+unstructured[all-docs]
+python-dotenv
+streamlit>=1.28
+pandas>=2.0
+Pillow>=10.0
+plotly>=5.18
+litellm>=1.55
+requests>=2.31
