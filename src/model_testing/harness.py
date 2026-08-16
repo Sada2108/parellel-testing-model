@@ -60,18 +60,31 @@ def build_langsmith_metadata(
 ) -> dict:
     """Build the ``metadata`` dict LiteLLM's langsmith callback reads.
 
-    Verified against the installed litellm's actual source
-    (litellm/integrations/langsmith.py): ``session_id`` groups every call
-    in one parallel-run batch into a single LangSmith session/trace tree;
-    ``run_name`` sets the per-call trace name; ``tags`` maps to
-    ``request_tags`` (read via ``metadata.get("tags", [])`` in
-    ``litellm_logging.py``); any other keys land in the trace's ``extra``
-    metadata, which is where chunk_id/datasheet_source/tested_by go.
+    ``session_id`` is NOT used as LangSmith's ``session_id`` field, despite
+    that field looking like the natural place for a "group these N calls
+    together" key. Confirmed empirically (real 404 from LangSmith's batch
+    API): LangSmith's ``session_id`` must reference an already-existing
+    tracer session/project server-side -- passing a freshly-generated UUID
+    for a batch that hasn't been registered anywhere gets the whole batch
+    rejected. Grouping is done via a tag instead (``batch:<id>``), which
+    doesn't need to pre-exist -- filter by that tag in the LangSmith UI to
+    see every model call from one parallel-run batch.
+
+    Also confirmed empirically (real trace, checked both the batch query
+    API and the single-run GET endpoint): LangSmith's backend only stores
+    a fixed, whitelisted set of ``extra`` fields -- arbitrary custom
+    metadata keys like ``chunk_id``/``datasheet_source``/``tested_by`` are
+    silently dropped before or during ingestion and never appear on the
+    stored run, even though LiteLLM sends them. Only ``run_name`` and
+    ``tags`` reliably survive. ``chunk_id`` is short enough to fold into
+    tags for real filterability; ``datasheet_source``/``tested_by`` are
+    left in the dict as best-effort (harmless, costs nothing) in case a
+    future LangSmith/LiteLLM version starts honoring them, but don't rely
+    on seeing them in the UI today.
     """
     return {
-        "session_id": session_id,
         "run_name": f"{call_site}:{model_label}",
-        "tags": [model_label, provider, call_site],
+        "tags": [model_label, provider, call_site, f"batch:{session_id}", f"chunk:{chunk_id}"],
         "chunk_id": chunk_id,
         "datasheet_source": datasheet_source,
         "tested_by": tested_by,
@@ -324,4 +337,17 @@ async def run_parallel_test(
 
 
 def new_run_id() -> str:
-    return uuid.uuid4().hex[:12]
+    """A full 32-char hex UUID (no dashes).
+
+    Passed into build_langsmith_metadata() as the batch-grouping value
+    (folded into a ``batch:<id>`` tag, not LangSmith's own session_id
+    field -- see that function's docstring). Used to be truncated to 12
+    chars for shorter UI labels; that's what originally broke tracing --
+    LangSmith's batch API validates any *actual* session_id field against
+    a strict UUID pattern (^[0-9a-f]{32}$ or the dashed form) and 422s on
+    anything else, and a 12-char truncated hex string matches neither. Now
+    unbounded: tags have no such format constraint, so full precision here
+    costs nothing. UI labels that want something shorter still slice this
+    themselves (e.g. Compare Outputs' run_id[:8]).
+    """
+    return uuid.uuid4().hex
