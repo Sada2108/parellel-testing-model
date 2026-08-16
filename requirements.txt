@@ -15,5 +15,5 @@ Pillow>=10.0
 plotly>=5.18
 opencv-python-headless==5.0.0.93
 langsmith
-litellm>=1.55
+litellm==1.96.2
 requests>=2.31
