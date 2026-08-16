@@ -49,6 +49,47 @@ else:
     logger.info("LANGSMITH_API_KEY not set -- LiteLLM->LangSmith tracing disabled for this harness.")
 
 
+async def flush_langsmith_logs() -> None:
+    """Force-flush any queued LangSmith events before the event loop closes.
+
+    LiteLLM's LangsmithLogger batches events and only sends them via a
+    periodic background task (default every 5s, litellm.DEFAULT_FLUSH_
+    INTERVAL_SECONDS) -- and that task's timer starts counting from when
+    the *first* event is queued (i.e. roughly when a model call finishes),
+    not from when the whole batch started. A short-lived asyncio.run()
+    call -- a single model, no judge -- can complete and tear down its
+    event loop well before that 5s timer ever fires, silently dropping
+    the trace even though the model call itself succeeded. Confirmed
+    empirically: multi-model + judge batches (which keep the loop alive
+    long enough for the timer to fire naturally) traced fine; a single-
+    model batch with no judge did not, with no error anywhere -- the
+    logging queue just never got flushed before the process moved on.
+
+    Call this at the end of every traced batch (after all model + judge
+    calls) instead of relying on the timer. No-op when tracing is off.
+
+    Also handles a second, faster race, confirmed empirically: LiteLLM
+    dispatches the actual "add this event to the queue" step as separate
+    background work, not as something ``acompletion()`` finishes before
+    returning control to the caller -- checked ``log_queue`` immediately
+    after a real call and it was still empty (0 items); after yielding
+    the event loop for 0.5s it had 1. Flushing immediately after the
+    model call, with no yield first, flushes an empty queue and reports
+    success while the real event is still in flight. The brief sleep
+    below isn't a magic number so much as "yield long enough for that
+    background dispatch to run" -- 0.5s had margin in testing.
+    """
+    if not LANGSMITH_ENABLED:
+        return
+    await asyncio.sleep(0.5)
+    for cb in litellm._async_success_callback:
+        if hasattr(cb, "flush_queue"):
+            try:
+                await cb.flush_queue()
+            except Exception as e:
+                logger.warning("LangSmith flush failed: %s", e)
+
+
 def build_langsmith_metadata(
     session_id: str,
     call_site: str,

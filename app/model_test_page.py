@@ -235,6 +235,7 @@ async def _run_and_score(
                 # without touching the model call's own result/error.
                 r.error = f"quality scoring failed: {raw[:2000]}"
 
+    await harness.flush_langsmith_logs()
     return results
 
 
@@ -478,6 +479,7 @@ async def _run_and_score_rag(
             if score is None and raw:
                 r.error = f"quality scoring failed: {raw[:2000]}"
 
+    await harness.flush_langsmith_logs()
     return results
 
 
