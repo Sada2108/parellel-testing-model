@@ -127,12 +127,15 @@ def _build_text_prompt(
         "You are given retrieved chunks from a technical document.\n"
         "Each chunk contains:\n"
         "- a searchable summary of the original content,\n"
+        "- the original raw text it was extracted from,\n"
         "- optional HTML tables,\n"
         "- optional attached figures/images.\n\n"
-        "Treat the summaries as authoritative representations of the document.\n"
+        "Treat the summary and raw text together as authoritative representations of "
+        "the document -- the raw text is the ground truth the summary was generated from, "
+        "so use it to verify or find specifics the summary may have condensed away.\n"
         "Do NOT claim information is absent unless you have examined ALL provided chunks.\n"
         "If a chunk explicitly contains the answer, answer directly using that chunk.\n"
-        "Use both the text summaries and the attached images when answering.\n",
+        "Use the text summaries, raw text, and attached images together when answering.\n",
         f"QUESTION: {query}\n",
         "RETRIEVED CONTEXT:",
         "",
@@ -140,6 +143,8 @@ def _build_text_prompt(
 
     chunk_text_chars = 0
     for i, chunk in enumerate(chunks[:5]):
+        original = extract_original_data(chunk)
+
         enhanced = chunk.page_content
         if enhanced:
             if summarize_context and llm is not None:
@@ -148,7 +153,12 @@ def _build_text_prompt(
             parts.append(f"--- Chunk {i + 1} ---")
             parts.append(f"SUMMARY:\n{enhanced.strip()}\n")
 
-        tables_html = extract_original_data(chunk)["tables_html"]
+        raw_text = original["raw_text"]
+        if raw_text:
+            chunk_text_chars += len(raw_text)
+            parts.append(f"RAW TEXT:\n{raw_text.strip()}\n")
+
+        tables_html = original["tables_html"]
         if tables_html:
             parts.append("TABLES:")
             for j, table in enumerate(tables_html):

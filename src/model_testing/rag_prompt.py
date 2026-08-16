@@ -16,12 +16,15 @@ def _build_rag_text_prompt(question: str, chunks: list[dict]) -> str:
         "You are given retrieved chunks from a technical document.\n"
         "Each chunk contains:\n"
         "- a searchable summary of the original content,\n"
+        "- the original raw text it was extracted from,\n"
         "- optional HTML tables,\n"
         "- optional attached figures/images.\n\n"
-        "Treat the summaries as authoritative representations of the document.\n"
+        "Treat the summary and raw text together as authoritative representations of "
+        "the document -- the raw text is the ground truth the summary was generated from, "
+        "so use it to verify or find specifics the summary may have condensed away.\n"
         "Do NOT claim information is absent unless you have examined ALL provided chunks.\n"
         "If a chunk explicitly contains the answer, answer directly using that chunk.\n"
-        "Use both the text summaries and the attached images when answering.\n",
+        "Use the text summaries, raw text, and attached images together when answering.\n",
         f"QUESTION: {question}\n",
         "RETRIEVED CONTEXT:",
         "",
@@ -32,6 +35,10 @@ def _build_rag_text_prompt(question: str, chunks: list[dict]) -> str:
         if enhanced:
             parts.append(f"--- Chunk {i + 1} ---")
             parts.append(f"SUMMARY:\n{enhanced.strip()}\n")
+
+        raw_text = chunk.get("raw_text") or ""
+        if raw_text:
+            parts.append(f"RAW TEXT:\n{raw_text.strip()}\n")
 
         tables_html = chunk.get("tables_html") or []
         if tables_html:
