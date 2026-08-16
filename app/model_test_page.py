@@ -15,6 +15,7 @@ Three tabs:
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from pathlib import Path
@@ -892,6 +893,52 @@ def render_compare_tab() -> None:
             output_text = row["output_text"] or ""
             display_text = output_text if show_raw else scoring.strip_think_blocks(output_text)
             st.markdown(display_text or "*empty*")
+
+    st.divider()
+    export_json = _export_runs_to_chunk_json(selected_rows)
+    st.download_button(
+        "Export selected runs to JSON (Chunk Explorer format)",
+        data=export_json,
+        file_name=f"parallel_test_export_{call_site}.json",
+        mime="application/json",
+        help='Same schema Chunk Explorer reads: a list of {chunk_id, enhanced_content, '
+             'metadata: {original_content: {raw_text, tables_html, images_base64}}}. '
+             "Load it there via \"Or upload your own JSON\" in the sidebar. Each selected "
+             "run becomes one entry -- enhanced_content is the <think>-stripped output "
+             "(Chunk Explorer's \"Enhanced Content\"), raw_text is the full unstripped "
+             'output_text (its "Raw Text"), matching how a real ingested chunk separates '
+             "the two. tables_html/images_base64 are empty -- the original chunk's "
+             "source content isn't stored on a test_runs row, only the model's output.",
+    )
+
+
+def _export_runs_to_chunk_json(rows: pd.DataFrame) -> str:
+    """Serialize selected stored runs into Chunk Explorer's JSON schema.
+
+    Schema matches src/ingestion/export.py's export_chunks_to_json() exactly
+    (chunk_id, enhanced_content, metadata.original_content.{raw_text,
+    tables_html, images_base64}) so the file loads directly via Chunk
+    Explorer's "Or upload your own JSON" uploader with no conversion step.
+    """
+    export_data = []
+    for i, (_, row) in enumerate(rows.iterrows()):
+        output_text = row["output_text"] or ""
+        export_data.append(
+            {
+                "chunk_id": i + 1,
+                "enhanced_content": scoring.strip_think_blocks(output_text),
+                "metadata": {
+                    "original_content": {
+                        "raw_text": output_text,
+                        "tables_html": [],
+                        "images_base64": [],
+                    },
+                    "model_label": row["model_label"],
+                    "run_label": row.get("_label", row["model_label"]),
+                },
+            }
+        )
+    return json.dumps(export_data, indent=2, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
