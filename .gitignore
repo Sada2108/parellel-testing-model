@@ -17,4 +17,11 @@ json/
 chunks_*.json
 rag_results.json
 last_prompt.txt
-dbv2/
+
+# dbv2/ is committed on purpose: it's the pre-built vector store the deployed
+# API reads from, and there's no ingestion step in the Dockerfile to rebuild
+# it -- shipping it in git is what the container actually gets. Explicit
+# negation needed because the generic chroma_db/ rule above would otherwise
+# also match the nested dbv2/chroma_db/ directory.
+!dbv2/
+!dbv2/**
