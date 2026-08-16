@@ -253,7 +253,14 @@ async def call_one_model(
         messages=messages,
         api_key=model_row["api_key"],
         temperature=0.0,
-        max_tokens=1024,
+        # Bumped from 1024 (same order-of-magnitude bump already applied to
+        # the judge's own budget) -- confirmed real truncation in production
+        # use: reasoning-heavy models (Nemotron, Gemma 4) can spend most or
+        # all of a 1024-token budget on <think>/reasoning_content before
+        # ever finishing a real answer, cutting it off mid-sentence. Applies
+        # uniformly to every registered model, not just reasoning ones --
+        # increases cost/latency across the board, not free.
+        max_tokens=2048,
         timeout=90,
     )
     if model_row.get("base_url"):
