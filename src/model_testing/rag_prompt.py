@@ -11,7 +11,9 @@ nothing in ``src/retrieval`` is imported or touched here.
 from __future__ import annotations
 
 
-def _build_rag_text_prompt(question: str, chunks: list[dict]) -> str:
+def _build_rag_text_prompt(
+    question: str, chunks: list[dict], max_answer_words: int | None = None
+) -> str:
     parts = [
         "You are given retrieved chunks from a technical document.\n"
         "Each chunk contains:\n"
@@ -48,10 +50,19 @@ def _build_rag_text_prompt(question: str, chunks: list[dict]) -> str:
 
         parts.append("")
 
-    parts.append(
-        "The images above are figures from the document. "
-        "Use the summaries, tables, and images together to provide a detailed answer."
-    )
+    if max_answer_words is None:
+        parts.append(
+            "The images above are figures from the document. "
+            "Use the summaries, tables, and images together to provide a detailed answer."
+        )
+    else:
+        parts.append(
+            "The images above are figures from the document. "
+            "Use the summaries, tables, and images together to answer the question "
+            f"in no more than {max_answer_words} words. Include only information "
+            "actually present in the retrieved context above; don't pad a simple "
+            "answer out to hit the word count."
+        )
 
     return "\n".join(parts)
 
@@ -70,7 +81,7 @@ def _collect_rag_images(chunks: list[dict]) -> list[dict]:
 
 
 def build_rag_test_messages(
-    question: str, chunks: list[dict], vision: bool
+    question: str, chunks: list[dict], vision: bool, max_answer_words: int | None = None
 ) -> list[dict]:
     """Build the chat ``messages`` list for testing a model at the
     Query & Retrieve call site.
@@ -82,11 +93,14 @@ def build_rag_test_messages(
         vision: Whether to attach chunk images. Non-vision models get a
             text-only prompt, same convention as the summary call site's
             ``_build_messages``.
+        max_answer_words: Soft word-count target for the answer, same
+            convention as the summary call site's ``max_summary_words``.
+            ``None`` (default) is unbounded, unchanged behavior.
 
     Returns:
         A ``messages`` list ready to pass to ``harness.call_one_model``.
     """
-    prompt_text = _build_rag_text_prompt(question, chunks)
+    prompt_text = _build_rag_text_prompt(question, chunks, max_answer_words)
 
     if not vision:
         return [{"role": "user", "content": prompt_text}]

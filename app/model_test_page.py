@@ -340,7 +340,7 @@ def _render_summary_run_tab() -> None:
     max_summary_words = (
         st.number_input(
             "Target word count",
-            min_value=20, max_value=500, value=150, step=10,
+            min_value=20, max_value=2000, value=150, step=10,
             help="120-200 words is a reasonable starting range for a typical datasheet "
                  "chunk (identification + key specs + topics) without room for restated "
                  "boilerplate -- adjust and re-run to find your own sweet spot.",
@@ -435,6 +435,7 @@ async def _run_and_score_rag(
     judge_row: dict | None,
     run_id: str | None = None,
     tested_by: str = "unknown",
+    max_answer_words: int | None = None,
 ) -> list[harness.ModelResult]:
     """Fan a RAG question+context prompt out to every selected model.
 
@@ -442,11 +443,18 @@ async def _run_and_score_rag(
     get chunk images attached, text-only models don't), so this builds
     ``messages`` per model row and passes them into ``call_one_model``
     instead of relying on its default chunk-derived prompt.
+
+    ``max_answer_words`` is the Query & Retrieve equivalent of the summary
+    call site's ``max_summary_words`` -- a soft word-count target baked
+    into the prompt, not a ``max_tokens`` cutoff. ``None`` (default) is
+    unbounded, unchanged behavior.
     """
     chunk_id = f"qr:{len(chunks)}chunks"
     tasks = []
     for row in model_rows:
-        messages = build_rag_test_messages(question, chunks, vision=bool(row["vision"]))
+        messages = build_rag_test_messages(
+            question, chunks, vision=bool(row["vision"]), max_answer_words=max_answer_words
+        )
         dummy_chunk = TestChunk(chunk_id="query", text=question)
         langsmith_metadata = (
             harness.build_langsmith_metadata(
@@ -557,6 +565,24 @@ def _render_query_retrieve_run_tab() -> None:
 
     tested_by = st.text_input("Tested by", placeholder="your name", key="qr_tested_by")
 
+    limit_answer = st.checkbox(
+        "Limit answer length (prompt instruction, not max_tokens)",
+        value=False,
+        key="qr_limit_answer",
+        help="Off = today's unbounded prompt, unchanged. On = a soft word-count target "
+             "baked into the prompt, same non-truncating approach as Datasheet Summary's "
+             "length limiter.",
+    )
+    max_answer_words = (
+        st.number_input(
+            "Target word count",
+            min_value=20, max_value=2000, value=150, step=10,
+            key="qr_max_answer_words",
+        )
+        if limit_answer
+        else None
+    )
+
     if st.button(
         "Run parallel test", type="primary", disabled=not selected_labels, key="qr_run_button"
     ):
@@ -567,6 +593,7 @@ def _render_query_retrieve_run_tab() -> None:
             results = asyncio.run(_run_and_score_rag(
                 model_rows, question, chunks, judge_row,
                 run_id=run_id, tested_by=tested_by or "unknown",
+                max_answer_words=max_answer_words,
             ))
 
         created_at = time.time()
@@ -592,6 +619,7 @@ def _render_query_retrieve_run_tab() -> None:
                 error=r.error,
                 call_site="query_retrieve",
                 reasoning_tokens=r.reasoning_tokens,
+                summary_word_limit=max_answer_words,
             )
 
         st.session_state.mt_qr_run_results = results
